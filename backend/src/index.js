@@ -5,6 +5,7 @@ import app from './app.js';
 import { initializeDatabase } from './config/database.js';
 import { initializeCartelas } from './services/cartelaService.js';
 import { ensureDefaultUser } from './services/userService.js';
+import { ensureDefaultAdmin } from './services/adminAuthService.js';
 import { initializeSocket } from './socket/index.js';
 
 const PORT = process.env.PORT || 3001;
@@ -13,6 +14,7 @@ const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 initializeDatabase();
 initializeCartelas();
 ensureDefaultUser();
+ensureDefaultAdmin();
 
 const httpServer = createServer(app);
 

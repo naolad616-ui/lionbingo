@@ -6,6 +6,11 @@ import {
   ROLE_LABELS,
   resolvePermissionsForRole,
 } from '../constants/adminRoles.js';
+import {
+  DEFAULT_ADMIN_NAME,
+  DEFAULT_ADMIN_PASSWORD,
+  DEFAULT_ADMIN_USERNAME,
+} from '../constants/adminDefaults.js';
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
@@ -151,19 +156,38 @@ export function recordAdminActivity({
 }
 
 export function ensureDefaultAdmin() {
-  const existing = selectAdminByUsername.get('admin');
+  const activeSuperAdmins = countSuperAdmins.get().total;
+  const existing = selectAdminByUsername.get(DEFAULT_ADMIN_USERNAME);
+  const bootstrapPermissions = JSON.stringify(
+    resolvePermissionsForRole(ADMIN_ROLES.SUPER_ADMIN),
+  );
+
   if (existing) {
+    if (activeSuperAdmins === 0) {
+      updateAdminPassword.run(hashPassword(DEFAULT_ADMIN_PASSWORD), existing.id);
+      updateAdminPermissions.run(
+        bootstrapPermissions,
+        ADMIN_ROLES.SUPER_ADMIN,
+        DEFAULT_ADMIN_NAME,
+        existing.id,
+      );
+      updateAdminActive.run(1, existing.id);
+      console.log(`[admin] Repaired bootstrap super admin "${DEFAULT_ADMIN_USERNAME}"`);
+      return mapAdmin(selectAdminById.get(existing.id));
+    }
+
     return mapAdmin(existing);
   }
 
   const result = insertAdmin.run(
-    'Super Admin',
-    'admin',
-    hashPassword('admin123'),
+    DEFAULT_ADMIN_NAME,
+    DEFAULT_ADMIN_USERNAME,
+    hashPassword(DEFAULT_ADMIN_PASSWORD),
     ADMIN_ROLES.SUPER_ADMIN,
-    JSON.stringify(resolvePermissionsForRole(ADMIN_ROLES.SUPER_ADMIN)),
+    bootstrapPermissions,
   );
 
+  console.log(`[admin] Seeded bootstrap super admin "${DEFAULT_ADMIN_USERNAME}"`);
   return mapAdmin(selectAdminById.get(Number(result.lastInsertRowid)));
 }
 
@@ -401,5 +425,3 @@ export function getAdminLoginHistory(limit = 100) {
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
   return selectLoginHistory.all(safeLimit).map(mapLoginHistory);
 }
-
-ensureDefaultAdmin();
