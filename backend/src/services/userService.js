@@ -2,12 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import db from '../config/database.js';
+import {
+  DEFAULT_GAME_NAME,
+  DEFAULT_GAME_PASSWORD,
+  DEFAULT_GAME_USERNAME,
+} from '../constants/userDefaults.js';
 import { hashPassword, verifyPassword } from '../utils/password.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = path.resolve(__dirname, '../../data/uploads/avatars');
 const DEFAULT_USER_ID = 1;
-const DEFAULT_PASSWORD = 'password';
 
 const selectProfile = db.prepare(`
   SELECT id, name, username, avatar_path, password_set_by_user, created_at, updated_at
@@ -47,6 +51,12 @@ const updatePasswordStmt = db.prepare(`
 const updateAvatarStmt = db.prepare(`
   UPDATE users
   SET avatar_path = ?, updated_at = datetime('now')
+  WHERE id = ?
+`);
+
+const repairBootstrapUserStmt = db.prepare(`
+  UPDATE users
+  SET name = ?, username = ?, password_hash = ?, password_set_by_user = 0, updated_at = datetime('now')
   WHERE id = ?
 `);
 
@@ -110,15 +120,50 @@ export function ensureUploadsDir() {
   }
 }
 
+function repairBootstrapUserIfNeeded(existing) {
+  if (!existing || existing.password_set_by_user) {
+    return existing;
+  }
+
+  const auth = selectAuth.get(DEFAULT_USER_ID);
+  const hasBootstrapCredentials =
+    auth &&
+    auth.username === DEFAULT_GAME_USERNAME &&
+    verifyPassword(DEFAULT_GAME_PASSWORD, auth.password_hash);
+
+  if (hasBootstrapCredentials) {
+    return existing;
+  }
+
+  repairBootstrapUserStmt.run(
+    DEFAULT_GAME_NAME,
+    DEFAULT_GAME_USERNAME,
+    hashPassword(DEFAULT_GAME_PASSWORD),
+    DEFAULT_USER_ID,
+  );
+
+  console.log(
+    `[user] Repaired bootstrap game user "${DEFAULT_GAME_USERNAME}"`,
+  );
+
+  return selectProfile.get(DEFAULT_USER_ID);
+}
+
 export function ensureDefaultUser() {
   ensureUploadsDir();
 
   const existing = selectProfile.get(DEFAULT_USER_ID);
   if (existing) {
-    return existing;
+    return repairBootstrapUserIfNeeded(existing);
   }
 
-  insertUser.run(DEFAULT_USER_ID, 'Abraham', 'Abraham5', hashPassword(DEFAULT_PASSWORD));
+  insertUser.run(
+    DEFAULT_USER_ID,
+    DEFAULT_GAME_NAME,
+    DEFAULT_GAME_USERNAME,
+    hashPassword(DEFAULT_GAME_PASSWORD),
+  );
+  console.log(`[user] Seeded bootstrap game user "${DEFAULT_GAME_USERNAME}"`);
   return selectProfile.get(DEFAULT_USER_ID);
 }
 
