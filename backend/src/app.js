@@ -8,8 +8,13 @@ import routes from './routes/index.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsRoot = path.resolve(__dirname, '../data/uploads');
 const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+const frontendSoundsSource = path.resolve(__dirname, '../../frontend/sounds');
+const frontendSoundsDist = path.join(frontendDist, 'sounds');
 const frontendIndex = path.join(frontendDist, 'index.html');
 const hasFrontendBuild = fs.existsSync(frontendIndex);
+const soundsRoot = fs.existsSync(frontendSoundsDist)
+  ? frontendSoundsDist
+  : frontendSoundsSource;
 
 const app = express();
 
@@ -20,6 +25,7 @@ app.use(cors({
 
 app.use(express.json());
 app.use('/uploads', express.static(uploadsRoot));
+app.use('/sounds', express.static(soundsRoot));
 app.use('/api', routes);
 
 if (hasFrontendBuild) {
@@ -33,6 +39,7 @@ if (hasFrontendBuild) {
     if (
       req.path.startsWith('/api')
       || req.path.startsWith('/uploads')
+      || req.path.startsWith('/sounds')
       || req.path.startsWith('/socket.io')
     ) {
       return next();
