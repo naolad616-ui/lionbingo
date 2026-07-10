@@ -523,6 +523,7 @@ export default function BingoCaller() {
         open={checkModalOpen}
         onClose={() => setCheckModalOpen(false)}
         calledNumbers={calledNumbers}
+        selectedCartelas={selectedCartelas}
         closed={closed}
         winProgressionActive={winProgressionActive}
         onWinOpportunityPassed={handleWinOpportunityPassed}

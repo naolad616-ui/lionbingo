@@ -41,13 +41,22 @@ import {
   resetCheckCardSoundState,
 } from '../../utils/gameSound';
 
-async function loadPatternSettings(gameData) {
-  if (gameData?.patterns && typeof gameData.patterns === 'object') {
-    return gameData.patterns;
+/** In-memory cartela payloads so repeat checks skip the network. */
+const cartelaResponseCache = new Map();
+
+async function getCachedCartela(cartelaNo) {
+  const key = String(cartelaNo ?? '').trim();
+  const cached = cartelaResponseCache.get(key);
+  if (cached) {
+    return { ok: true, data: cached, fromCache: true };
   }
 
-  const result = await fetchPatternSettings();
-  return result.ok ? result.patterns : null;
+  const result = await fetchCartela(key);
+  if (result.ok && result.data) {
+    cartelaResponseCache.set(key, result.data);
+  }
+
+  return result;
 }
 
 function runCheckCardValidation({
@@ -72,6 +81,7 @@ export default function CheckCardModal({
   open,
   onClose,
   calledNumbers: callerCalledNumbers = [],
+  selectedCartelas: selectedCartelasProp,
   closed: closedProp,
   winProgressionActive = false,
   onWinOpportunityPassed,
@@ -220,8 +230,11 @@ export default function CheckCardModal({
   );
 
   const isPurchased = useMemo(
-    () => isCartelaPurchased(cartelaNo, selectedCartelas),
-    [cartelaNo, selectedCartelas],
+    () => isCartelaPurchased(
+      cartelaNo,
+      Array.isArray(selectedCartelasProp) ? selectedCartelasProp : selectedCartelas,
+    ),
+    [cartelaNo, selectedCartelas, selectedCartelasProp],
   );
 
   const winningCells = useMemo(
@@ -311,6 +324,14 @@ export default function CheckCardModal({
           setPatternSettings(patternsResult.patterns);
         }
       }
+
+      return;
+    }
+
+    // Fallback: warm patterns so the next CHECK can stay local.
+    const patternsResult = await fetchPatternSettings();
+    if (patternsResult.ok && patternsResult.patterns) {
+      setPatternSettings((current) => current ?? patternsResult.patterns);
     }
   }, [applyBackendGameState]);
 
@@ -328,25 +349,54 @@ export default function CheckCardModal({
     setIsLoading(true);
     setStatusMessage('');
 
-    const gameStateResult = await fetchGameState();
-    const gameData = gameStateResult.ok ? gameStateResult.data : null;
-    if (gameData) {
-      applyBackendGameState(gameData);
-    }
-
-    const activePatterns = await loadPatternSettings(gameData);
-    if (activePatterns) {
-      setPatternSettings(activePatterns);
-    }
-
-    const activeSelectedCartelas = Array.isArray(gameData?.sales?.selectedCartelas)
-      ? gameData.sales.selectedCartelas
+    // Prefer live caller/session data already in memory.
+    const knownSelectedCartelas = Array.isArray(selectedCartelasProp)
+      ? selectedCartelasProp
       : selectedCartelas;
-    const backendCalls = Array.isArray(gameData?.calledNumbers)
-      ? gameData.calledNumbers
-      : backendCalledNumbers;
+    let activePatterns = patternSettings;
+    let backendCalls = backendCalledNumbers;
+    let gameData = null;
 
-    const cartelaResult = await fetchCartela(trimmedCartelaNo);
+    const needsPatterns = !activePatterns || typeof activePatterns !== 'object';
+
+    // Fetch cartela (cached) in parallel with patterns/game state only when missing.
+    const cartelaPromise = getCachedCartela(trimmedCartelaNo);
+    const supportPromise = needsPatterns
+      ? (async () => {
+        const [gameStateResult, patternsResult] = await Promise.all([
+          fetchGameState(),
+          fetchPatternSettings(),
+        ]);
+        const data = gameStateResult.ok ? gameStateResult.data : null;
+        if (data) {
+          applyBackendGameState(data);
+        }
+
+        const patterns = (data?.patterns && typeof data.patterns === 'object')
+          ? data.patterns
+          : (patternsResult.ok ? patternsResult.patterns : null);
+
+        return {
+          data,
+          patterns,
+          backendCalls: Array.isArray(data?.calledNumbers) ? data.calledNumbers : null,
+        };
+      })()
+      : Promise.resolve(null);
+
+    const [cartelaResult, support] = await Promise.all([cartelaPromise, supportPromise]);
+
+    if (support) {
+      gameData = support.data;
+      if (support.patterns) {
+        activePatterns = support.patterns;
+        setPatternSettings(support.patterns);
+      }
+      if (Array.isArray(support.backendCalls)) {
+        backendCalls = support.backendCalls;
+      }
+    }
+
     if (!cartelaResult.ok) {
       setIsLoading(false);
       setNumbers(null);
@@ -356,7 +406,7 @@ export default function CheckCardModal({
       return;
     }
 
-    const purchased = isCartelaPurchased(trimmedCartelaNo, activeSelectedCartelas);
+    const purchased = isCartelaPurchased(trimmedCartelaNo, knownSelectedCartelas);
     let nextCheckResult = null;
 
     if (purchased && activePatterns) {
@@ -370,6 +420,7 @@ export default function CheckCardModal({
       });
     }
 
+    // Show validated result immediately — do not wait on sounds or backend echo.
     setIsLoading(false);
     setNumbers(cartelaResult.data.numbers);
     setCardLoaded(true);
@@ -400,36 +451,41 @@ export default function CheckCardModal({
       return;
     }
 
+    // Keep session state fresh in the background (non-blocking).
+    if (!needsPatterns) {
+      void refreshBackendGameState();
+    }
+
     const activeMiss = getActiveMissState(trimmedCartelaNo);
 
     if (playSounds && purchased && nextCheckResult) {
-      await playCheckCardResultSounds({
+      void playCheckCardResultSounds({
         purchased,
         localCheckResult: nextCheckResult,
         priorProgress,
         priorMiss: activeMiss,
         soundKey: celebrationWin ? soundKey : null,
-      });
+      }).then(() => {
+        if (checkActionId !== checkActionIdRef.current) {
+          return;
+        }
 
-      if (checkActionId !== checkActionIdRef.current) {
-        return;
-      }
+        if (celebrationWin) {
+          recordFinalWinner({
+            parsedCartelaNo,
+            nextCheckResult,
+            mergedCalls,
+            gameData,
+            soundKey,
+          });
+        }
 
-      if (celebrationWin) {
-        recordFinalWinner({
-          parsedCartelaNo,
-          nextCheckResult,
-          mergedCalls,
-          gameData,
-          soundKey,
-        });
-      }
-
-      void checkCartelaInGame(trimmedCartelaNo).then((backendCheck) => {
-        console.log('[check-card-sound] Backend check (informational, post-play):', {
-          ok: backendCheck.ok,
-          data: backendCheck.ok ? backendCheck.data : null,
-          error: backendCheck.ok ? null : backendCheck.error,
+        void checkCartelaInGame(trimmedCartelaNo).then((backendCheck) => {
+          console.log('[check-card-sound] Backend check (informational, post-play):', {
+            ok: backendCheck.ok,
+            data: backendCheck.ok ? backendCheck.data : null,
+            error: backendCheck.ok ? null : backendCheck.error,
+          });
         });
       });
     }
@@ -440,10 +496,13 @@ export default function CheckCardModal({
     effectiveClosed,
     getActiveMissState,
     getPriorProgress,
+    patternSettings,
     selectedCartelas,
+    selectedCartelasProp,
     applyCheckOutcome,
     recordFinalWinner,
     notifyWinOpportunityPassed,
+    refreshBackendGameState,
     winProgressionActive,
   ]);
 
@@ -521,7 +580,10 @@ export default function CheckCardModal({
       const parsedCartelaNo = parseCartelaNumber(trimmed);
       if (!parsedCartelaNo) return;
 
-      const purchased = isCartelaPurchased(trimmed, selectedCartelas);
+      const purchased = isCartelaPurchased(
+        trimmed,
+        Array.isArray(selectedCartelasProp) ? selectedCartelasProp : selectedCartelas,
+      );
       let nextCheckResult = null;
 
       if (purchased && patternSettings && numbers) {
@@ -558,6 +620,7 @@ export default function CheckCardModal({
     numbers,
     effectiveCalledNumbers,
     selectedCartelas,
+    selectedCartelasProp,
     patternSettings,
     callerCalledNumbers,
     backendCalledNumbers,

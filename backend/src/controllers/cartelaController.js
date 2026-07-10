@@ -54,28 +54,13 @@ function buildCartelaResponse(cartelaNo, cartela) {
 }
 
 function respondWithCartela(req, res, rawCartelaNo) {
-  const route = req.originalUrl ?? req.url ?? 'unknown';
-  console.log('[cartela-lookup] route:', route, 'requested cardId:', rawCartelaNo);
-
   const parsed = parseCartelaNo(rawCartelaNo);
   if (!parsed.ok) {
-    console.log('[cartela-lookup] invalid cardId:', rawCartelaNo, '-', parsed.reason);
     res.status(400).json({ error: parsed.reason });
     return;
   }
 
   const lookup = describeCartelaLookup(parsed.cartelaNo);
-  console.log(
-    '[cartela-lookup] cardId:',
-    lookup.cardId,
-    'existsInDb:',
-    lookup.existsInDb,
-    'existsInWorkbook:',
-    lookup.existsInWorkbook,
-    'source:',
-    lookup.source ?? 'none',
-  );
-
   const cartela = lookup.cartela;
   if (!cartela) {
     console.error('[cartela-lookup] card unavailable for valid range:', parsed.cartelaNo);
@@ -83,9 +68,7 @@ function respondWithCartela(req, res, rawCartelaNo) {
     return;
   }
 
-  const payload = buildCartelaResponse(parsed.cartelaNo, cartela);
-  console.log('[cartela-lookup] response cardId:', payload.cartelaNo);
-  res.json(payload);
+  res.json(buildCartelaResponse(parsed.cartelaNo, cartela));
 }
 
 export function getCartelaByNumber(req, res) {
