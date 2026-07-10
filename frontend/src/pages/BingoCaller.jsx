@@ -9,6 +9,7 @@ import {
   playPauseSound,
   playShuffleSound,
   playWinThenPauseSounds,
+  preloadGameSounds,
   stopGameSounds,
 } from '../utils/gameSound';
 import getSocket from '../services/socket';
@@ -283,6 +284,11 @@ export default function BingoCaller() {
   useEffect(() => {
     isRunningRef.current = isRunning;
   }, [isRunning]);
+
+  useEffect(() => {
+    // Warm audio cache in the background so ball calls play from memory, not network.
+    void preloadGameSounds();
+  }, []);
 
   useEffect(() => {
     isPausedRef.current = isPaused;

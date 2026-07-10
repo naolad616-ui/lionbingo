@@ -25,7 +25,19 @@ app.use(cors({
 
 app.use(express.json());
 app.use('/uploads', express.static(uploadsRoot));
-app.use('/sounds', express.static(soundsRoot));
+app.use(
+  '/sounds',
+  express.static(soundsRoot, {
+    maxAge: '7d',
+    immutable: true,
+    setHeaders(res, filePath) {
+      if (String(filePath).toLowerCase().endsWith('.mp3')) {
+        res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+        res.setHeader('Content-Type', 'audio/mpeg');
+      }
+    },
+  }),
+);
 app.use('/api', routes);
 
 if (hasFrontendBuild) {

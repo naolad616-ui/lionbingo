@@ -5,10 +5,16 @@ import {
 } from './checkCard';
 
 const SOUNDS_BASE_PATH = '/sounds';
+const HAVE_CURRENT_DATA = 2;
+const HAVE_FUTURE_DATA = 3;
+
+/** Reusable HTMLAudioElement instances keyed by file name (no per-call download). */
+const audioCache = new Map();
 
 let activeAudio = null;
 let activePlaybackToken = 0;
 let lastCheckCardWinSoundKey = null;
+let preloadPromise = null;
 
 function soundPath(fileName) {
   return `${SOUNDS_BASE_PATH}/${fileName}`;
@@ -29,36 +35,131 @@ export function getBallSoundFileName(number) {
     return null;
   }
 
-  let fileName;
-
   if (ballNumber >= 61 && ballNumber <= 75) {
-    fileName = `o-${ballNumber}.mp3`;
-  } else if (ballNumber >= 46) {
-    fileName = `g-${ballNumber}.mp3`;
-  } else if (ballNumber >= 31) {
-    fileName = `n-${ballNumber}.mp3`;
-  } else if (ballNumber >= 16) {
-    fileName = `i-${ballNumber}.mp3`;
-  } else {
-    fileName = `b-${ballNumber}.mp3`;
+    return `o-${ballNumber}.mp3`;
+  }
+  if (ballNumber >= 46) {
+    return `g-${ballNumber}.mp3`;
+  }
+  if (ballNumber >= 31) {
+    return `n-${ballNumber}.mp3`;
+  }
+  if (ballNumber >= 16) {
+    return `i-${ballNumber}.mp3`;
+  }
+  return `b-${ballNumber}.mp3`;
+}
+
+function listGameSoundFiles() {
+  const files = [];
+
+  for (let ballNumber = 1; ballNumber <= 75; ballNumber += 1) {
+    const fileName = getBallSoundFileName(ballNumber);
+    if (fileName) {
+      files.push(fileName);
+    }
   }
 
-  if (ballNumber >= 61 && ballNumber <= 75) {
-    console.log('[game-sound] O-range path resolved:', {
-      ballNumber,
-      fileName,
-      path: soundPath(fileName),
-    });
+  files.push('win.mp3', 'not-win.mp3', 'pause.mp3', 'shuffle.mp3');
+  return files;
+}
+
+function getCachedAudio(fileName) {
+  let audio = audioCache.get(fileName);
+  if (audio) {
+    return audio;
   }
 
-  return fileName;
+  audio = new Audio();
+  audio.preload = 'auto';
+  audio.src = soundPath(fileName);
+  audioCache.set(fileName, audio);
+  return audio;
+}
+
+function waitForAudioReady(audio) {
+  if (audio.readyState >= HAVE_FUTURE_DATA) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      audio.removeEventListener('canplaythrough', onReady);
+      audio.removeEventListener('loadeddata', onReady);
+      audio.removeEventListener('error', onError);
+      resolve(ok);
+    };
+
+    const onReady = () => finish(true);
+    const onError = () => finish(false);
+
+    audio.addEventListener('canplaythrough', onReady);
+    audio.addEventListener('loadeddata', onReady);
+    audio.addEventListener('error', onError);
+
+    // Kick off network fetch/decode without blocking the caller.
+    try {
+      audio.load();
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+/**
+ * Preload ball + UI sounds into a reusable Audio cache.
+ * Safe to call multiple times; yields between batches to avoid UI freezes.
+ */
+export function preloadGameSounds() {
+  if (preloadPromise) {
+    return preloadPromise;
+  }
+
+  const files = listGameSoundFiles();
+
+  preloadPromise = (async () => {
+    const batchSize = 6;
+
+    for (let index = 0; index < files.length; index += batchSize) {
+      const batch = files.slice(index, index + batchSize);
+      await Promise.all(
+        batch.map(async (fileName) => {
+          const audio = getCachedAudio(fileName);
+          await waitForAudioReady(audio);
+        }),
+      );
+
+      // Yield so number-call UI / React work can run between batches.
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 0);
+      });
+    }
+
+    console.log('[game-sound] preload complete', { count: audioCache.size });
+    return true;
+  })().catch((error) => {
+    console.warn('[game-sound] preload failed', error);
+    preloadPromise = null;
+    return false;
+  });
+
+  return preloadPromise;
 }
 
 function stopActiveSound() {
   if (!activeAudio) return;
 
-  activeAudio.pause();
-  activeAudio.currentTime = 0;
+  try {
+    activeAudio.pause();
+    activeAudio.currentTime = 0;
+  } catch {
+    // ignore seek/pause errors on partially loaded media
+  }
+
   activeAudio = null;
 }
 
@@ -115,12 +216,14 @@ function playSoundFile(fileName, { logLabel, logCategory } = {}) {
   const logPrefix = logCategory === 'check-card' ? '[check-card-sound]' : '[game-sound]';
 
   if (logLabel) {
-    console.log(`${logPrefix} loading sound: ${logLabel}, file=${fileName}, path=${path}`);
+    console.log(`${logPrefix} playing sound: ${logLabel}, file=${fileName}`);
   }
 
+  // Ensure background preload continues while calls happen.
+  void preloadGameSounds();
+
   return new Promise((resolve) => {
-    const audio = new Audio(path);
-    audio.preload = 'auto';
+    const audio = getCachedAudio(fileName);
 
     const cleanup = () => {
       audio.removeEventListener('ended', onEnded);
@@ -164,20 +267,34 @@ function playSoundFile(fileName, { logLabel, logCategory } = {}) {
         return;
       }
 
-      activeAudio = audio;
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // ignore
+      }
 
-      audio.play()
+      activeAudio = audio;
+      audio.addEventListener('ended', onEnded);
+      audio.addEventListener('error', onError);
+
+      const playAttempt = audio.play();
+      if (!playAttempt || typeof playAttempt.then !== 'function') {
+        return;
+      }
+
+      playAttempt
         .then(() => {
           if (token !== activePlaybackToken) {
             return;
           }
-
-          console.log(`${logPrefix} playback started successfully`, { fileName, path });
+          console.log(`${logPrefix} playback started`, { fileName, path, cached: true });
         })
         .catch((playError) => {
           if (token !== activePlaybackToken) {
             return;
           }
+
+          cleanup();
 
           if (logCategory === 'check-card') {
             logCheckCardSoundFailure(fileName, audio, playError);
@@ -193,10 +310,28 @@ function playSoundFile(fileName, { logLabel, logCategory } = {}) {
         });
     };
 
-    audio.addEventListener('ended', onEnded);
-    audio.addEventListener('error', onError);
-    audio.load();
-    startPlayback();
+    // Play immediately when already buffered; otherwise wait without creating a new Audio.
+    if (audio.readyState >= HAVE_CURRENT_DATA) {
+      startPlayback();
+      return;
+    }
+
+    const onReady = () => {
+      audio.removeEventListener('canplaythrough', onReady);
+      audio.removeEventListener('loadeddata', onReady);
+      startPlayback();
+    };
+
+    audio.addEventListener('canplaythrough', onReady);
+    audio.addEventListener('loadeddata', onReady);
+
+    if (audio.readyState === 0) {
+      try {
+        audio.load();
+      } catch {
+        onReady();
+      }
+    }
   });
 }
 
@@ -206,9 +341,9 @@ export function primeCheckCardSoundPlayback() {
   console.log('[check-card-sound] Priming browser audio for check playback at:', path);
 
   void probeSoundFile('not-win.mp3');
+  void preloadGameSounds();
 
-  const audio = new Audio(path);
-  audio.preload = 'auto';
+  const audio = getCachedAudio('not-win.mp3');
 
   const playAttempt = audio.play();
   if (!playAttempt || typeof playAttempt.then !== 'function') {
@@ -281,7 +416,6 @@ export async function playWinThenPauseSounds() {
 
   return playPauseSound();
 }
-
 
 export async function playCheckCardResultSounds({
   purchased,
