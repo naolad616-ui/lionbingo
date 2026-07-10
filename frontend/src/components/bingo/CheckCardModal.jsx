@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import CheckCardPreview from './CheckCardPreview';
+import CheckCardWinnerConfetti from './CheckCardWinnerConfetti';
 import {
   fetchCartela,
   fetchGameState,
@@ -10,6 +11,7 @@ import {
 import getSocket from '../../services/socket';
 import {
   CHECK_CARD_MESSAGES,
+  accumulateCartelaLineHighlights,
   isCartelaPurchased,
   isCheckCardCelebrationWin,
   isCheckCardExpiredMessage,
@@ -21,11 +23,17 @@ import {
   resolveCheckCardWinningCells,
   resolveClosedValue,
   snapshotCheckCardProgress,
-  snapshotMissedClaim,
-  updateMissedClaimEvaluation,
   validateCheckCardWin,
   isWinOpportunityPassed,
 } from '../../utils/checkCard';
+import {
+  getLockedCartelas,
+  isCartelaLocked,
+  lockCartela,
+  readCartelaCheckState,
+  unlockCartela,
+  writeCartelaCheckState,
+} from '../../utils/checkCardSession';
 import { recordCheckCardWinner } from '../../utils/gameSalesTracking';
 import {
   playCheckCardResultSounds,
@@ -82,8 +90,10 @@ export default function CheckCardModal({
   const [backendClosed, setBackendClosed] = useState(null);
   const lastCelebratedCallCountRef = useRef(0);
   const cardProgressRef = useRef(null);
-  const missedClaimRef = useRef(null);
   const checkActionIdRef = useRef(0);
+  const [missedClaimRevision, setMissedClaimRevision] = useState(0);
+  const [winnerConfettiKey, setWinnerConfettiKey] = useState(0);
+  const previousStatusRef = useRef('');
 
   const getPriorProgress = useCallback((trimmedCartelaNo) => {
     const stored = cardProgressRef.current;
@@ -94,13 +104,38 @@ export default function CheckCardModal({
     return stored;
   }, []);
 
-  const getPriorMiss = useCallback((trimmedCartelaNo) => {
-    const stored = missedClaimRef.current;
-    if (!stored || stored.cartelaNo !== String(trimmedCartelaNo).trim()) {
+  const getCartelaCheckState = useCallback((trimmedCartelaNo) => {
+    return readCartelaCheckState(trimmedCartelaNo);
+  }, []);
+
+  const getActiveMissState = useCallback((trimmedCartelaNo) => {
+    const state = readCartelaCheckState(trimmedCartelaNo);
+    if (!state?.missedWinActive || state.confirmedWin) {
       return null;
     }
 
-    return stored;
+    return state;
+  }, []);
+
+  const persistLineHighlights = useCallback((
+    trimmedCartelaNo,
+    nextCheckResult,
+    priorProgress,
+  ) => {
+    const priorState = readCartelaCheckState(trimmedCartelaNo);
+    const nextState = accumulateCartelaLineHighlights(
+      priorState,
+      nextCheckResult,
+      priorProgress,
+    );
+
+    writeCartelaCheckState(trimmedCartelaNo, {
+      ...nextState,
+      cartelaNo: trimmedCartelaNo,
+    });
+    setMissedClaimRevision((value) => value + 1);
+
+    return nextState;
   }, []);
 
   const applyCheckOutcome = useCallback(({
@@ -108,9 +143,11 @@ export default function CheckCardModal({
     nextCheckResult,
     purchased,
     callCount,
+    suppressCelebration = false,
   }) => {
     const priorProgress = getPriorProgress(trimmedCartelaNo);
-    const priorMiss = getPriorMiss(trimmedCartelaNo);
+    const priorState = getCartelaCheckState(trimmedCartelaNo);
+    const priorMiss = getActiveMissState(trimmedCartelaNo);
     const message = resolveCheckCardMessage({
       cartFound: true,
       checkResult: nextCheckResult,
@@ -122,9 +159,19 @@ export default function CheckCardModal({
     setCheckResult(nextCheckResult);
     setStatusMessage(message);
 
+    if (
+      !suppressCelebration
+      && message === CHECK_CARD_MESSAGES.winner
+      && previousStatusRef.current !== CHECK_CARD_MESSAGES.winner
+    ) {
+      setWinnerConfettiKey((value) => value + 1);
+    }
+    previousStatusRef.current = message;
+
+    persistLineHighlights(trimmedCartelaNo, nextCheckResult, priorProgress);
+
     if (isCheckCardCelebrationWin(nextCheckResult, priorMiss)) {
       cardProgressRef.current = null;
-      missedClaimRef.current = null;
       return;
     }
 
@@ -132,6 +179,7 @@ export default function CheckCardModal({
       trimmedCartelaNo,
       nextCheckResult,
       callCount,
+      priorProgress,
     );
 
     if (nextSnapshot) {
@@ -139,31 +187,15 @@ export default function CheckCardModal({
       return;
     }
 
-    if (priorMiss) {
-      missedClaimRef.current = updateMissedClaimEvaluation(priorMiss, nextCheckResult);
-      cardProgressRef.current = null;
-      return;
-    }
-
-    if (message === CHECK_CARD_MESSAGES.expired) {
-      const missedSnapshot = snapshotMissedClaim(
-        trimmedCartelaNo,
-        nextCheckResult,
-        priorProgress,
-      );
-
-      if (missedSnapshot) {
-        missedClaimRef.current = missedSnapshot;
-      }
-
-      cardProgressRef.current = null;
-      return;
-    }
-
     if (isCheckCardExpiredMessage(nextCheckResult, priorProgress, priorMiss)) {
       cardProgressRef.current = null;
     }
-  }, [getPriorMiss, getPriorProgress]);
+  }, [
+    getActiveMissState,
+    getCartelaCheckState,
+    getPriorProgress,
+    persistLineHighlights,
+  ]);
 
   const effectiveClosed = useMemo(
     () => resolveClosedValue(closedProp, backendClosed, readStoredClosedValue()),
@@ -196,9 +228,9 @@ export default function CheckCardModal({
     () => resolveCheckCardWinningCells(
       checkResult,
       isPurchased,
-      getPriorMiss(cartelaNo.trim()),
+      getCartelaCheckState(cartelaNo.trim()),
     ),
-    [checkResult, cartelaNo, getPriorMiss, isPurchased],
+    [checkResult, cartelaNo, getCartelaCheckState, isPurchased, missedClaimRevision],
   );
 
   const recordFinalWinner = useCallback(({
@@ -243,8 +275,10 @@ export default function CheckCardModal({
     setBackendClosed(null);
     lastCelebratedCallCountRef.current = 0;
     cardProgressRef.current = null;
-    missedClaimRef.current = null;
     checkActionIdRef.current = 0;
+    setMissedClaimRevision(0);
+    setWinnerConfettiKey(0);
+    previousStatusRef.current = '';
     resetCheckCardSoundState();
   }, []);
 
@@ -280,7 +314,8 @@ export default function CheckCardModal({
     }
   }, [applyBackendGameState]);
 
-  const evaluateCard = useCallback(async (trimmedCartelaNo, checkActionId) => {
+  const evaluateCard = useCallback(async (trimmedCartelaNo, checkActionId, options = {}) => {
+    const { playSounds = true } = options;
     const parsedCartelaNo = parseCartelaNumber(trimmedCartelaNo);
     if (!parsedCartelaNo) {
       setNumbers(null);
@@ -338,13 +373,15 @@ export default function CheckCardModal({
     setIsLoading(false);
     setNumbers(cartelaResult.data.numbers);
     setCardLoaded(true);
-    setIsLocked(true);
+    setIsLocked(isCartelaLocked(trimmedCartelaNo));
 
     const mergedCalls = mergeCalledNumbers(callerCalledNumbers, backendCalls);
     const callCount = mergedCalls.length;
     const priorProgress = getPriorProgress(trimmedCartelaNo);
-    const priorMiss = getPriorMiss(trimmedCartelaNo);
-    const celebrationWin = isCheckCardCelebrationWin(nextCheckResult, priorMiss);
+    const celebrationWin = isCheckCardCelebrationWin(
+      nextCheckResult,
+      getActiveMissState(trimmedCartelaNo),
+    );
     const soundKey = celebrationWin
       ? `${trimmedCartelaNo}:${callCount}:${checkActionId}`
       : null;
@@ -356,18 +393,21 @@ export default function CheckCardModal({
       nextCheckResult,
       purchased,
       callCount,
+      suppressCelebration: !playSounds,
     });
 
     if (checkActionId !== checkActionIdRef.current) {
       return;
     }
 
-    if (purchased && nextCheckResult) {
+    const activeMiss = getActiveMissState(trimmedCartelaNo);
+
+    if (playSounds && purchased && nextCheckResult) {
       await playCheckCardResultSounds({
         purchased,
         localCheckResult: nextCheckResult,
         priorProgress,
-        priorMiss,
+        priorMiss: activeMiss,
         soundKey: celebrationWin ? soundKey : null,
       });
 
@@ -398,7 +438,7 @@ export default function CheckCardModal({
     backendCalledNumbers,
     callerCalledNumbers,
     effectiveClosed,
-    getPriorMiss,
+    getActiveMissState,
     getPriorProgress,
     selectedCartelas,
     applyCheckOutcome,
@@ -415,8 +455,20 @@ export default function CheckCardModal({
 
     refreshBackendGameState();
 
+    const lockedCartelas = getLockedCartelas();
+    const restoredCartela = lockedCartelas[0] ?? null;
+
+    if (restoredCartela) {
+      setCartelaNo(restoredCartela);
+      const restoreActionId = checkActionIdRef.current + 1;
+      checkActionIdRef.current = restoreActionId;
+      void evaluateCard(restoredCartela, restoreActionId, { playSounds: false });
+    }
+
     const frame = window.requestAnimationFrame(() => {
-      inputRef.current?.focus();
+      if (!restoredCartela) {
+        inputRef.current?.focus();
+      }
     });
 
     const handleKeyDown = (event) => {
@@ -453,10 +505,12 @@ export default function CheckCardModal({
       socket.off('game:state', handleGameState);
       socket.off('ball:called', handleBallCalled);
     };
+    // Restore locked cartela only when the modal opens, not when evaluateCard identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, onClose, resetState, refreshBackendGameState, applyBackendGameState]);
 
   useEffect(() => {
-    if (!open || !cardLoaded || !isLocked) return undefined;
+    if (!open || !cardLoaded) return undefined;
 
     const trimmed = cartelaNo.trim();
     if (!trimmed) return undefined;
@@ -500,7 +554,6 @@ export default function CheckCardModal({
   }, [
     open,
     cardLoaded,
-    isLocked,
     cartelaNo,
     numbers,
     effectiveCalledNumbers,
@@ -514,6 +567,22 @@ export default function CheckCardModal({
     winProgressionActive,
   ]);
 
+  const handleLockToggle = useCallback(() => {
+    const trimmed = cartelaNo.trim();
+    if (!trimmed || !cardLoaded) {
+      return;
+    }
+
+    if (isLocked) {
+      unlockCartela(trimmed);
+      setIsLocked(false);
+      return;
+    }
+
+    lockCartela(trimmed);
+    setIsLocked(true);
+  }, [cardLoaded, cartelaNo, isLocked]);
+
   const handleAction = useCallback(async () => {
     const trimmed = cartelaNo.trim();
     if (!trimmed) {
@@ -524,19 +593,35 @@ export default function CheckCardModal({
       return;
     }
 
-    if (!isLocked) {
-      primeCheckCardSoundPlayback();
+    if (isLocked) {
+      handleLockToggle();
+      return;
     }
+
+    if (cardLoaded) {
+      handleLockToggle();
+      return;
+    }
+
+    primeCheckCardSoundPlayback();
 
     const checkActionId = checkActionIdRef.current + 1;
     checkActionIdRef.current = checkActionId;
     await evaluateCard(trimmed, checkActionId);
-  }, [cartelaNo, evaluateCard, isLocked]);
+  }, [cardLoaded, cartelaNo, evaluateCard, handleLockToggle, isLocked]);
 
   const handleSubmit = useCallback((event) => {
     event.preventDefault();
     handleAction();
   }, [handleAction]);
+
+  const actionButtonLabel = isLoading
+    ? 'CHECKING...'
+    : isLocked
+      ? 'UNLOCK'
+      : cardLoaded
+        ? 'LOCK'
+        : 'CHECK';
 
   const displayTitle = cardLoaded
     ? `Check Card No. - ${cartelaNo.trim()}`
@@ -555,12 +640,21 @@ export default function CheckCardModal({
             exit={{ opacity: 0, y: 12, scale: 0.75 }}
             transition={{ duration: 0.2, ease: 'easeOut' }}
             style={{ transformOrigin: 'bottom left' }}
-            className="check-card-modal"
+            className={`check-card-modal${isLocked ? ' check-card-modal--locked' : ''}`}
           >
+            <CheckCardWinnerConfetti
+              active={statusMessage === CHECK_CARD_MESSAGES.winner}
+              celebrationKey={winnerConfettiKey}
+            />
             <div className="check-card-modal-header">
               <h2 id="check-card-title" className="check-card-modal-title">
                 {displayTitle}
               </h2>
+              {isLocked ? (
+                <span className="check-card-modal-locked-badge" aria-live="polite">
+                  LOCKED
+                </span>
+              ) : null}
               <button
                 type="button"
                 onClick={onClose}
@@ -586,9 +680,15 @@ export default function CheckCardModal({
                     ref={inputRef}
                     type="text"
                     inputMode="numeric"
-                    className="check-card-modal-input"
+                    className={`check-card-modal-input${isLocked ? ' check-card-modal-input--locked' : ''}`}
                     value={cartelaNo}
+                    readOnly={isLocked}
+                    aria-readonly={isLocked}
                     onChange={(event) => {
+                      if (isLocked) {
+                        return;
+                      }
+
                       setCartelaNo(event.target.value);
                       if (cardLoaded) {
                         setCardLoaded(false);
@@ -597,16 +697,19 @@ export default function CheckCardModal({
                         setStatusMessage('');
                         setCheckResult(null);
                         cardProgressRef.current = null;
-                        missedClaimRef.current = null;
+                        previousStatusRef.current = '';
                       }
                     }}
                   />
                   <button
                     type="submit"
-                    className="check-card-modal-submit"
+                    className={`check-card-modal-submit${
+                      isLocked ? ' check-card-modal-submit--unlock' : ''
+                    }${cardLoaded && !isLocked ? ' check-card-modal-submit--lock' : ''}`}
                     disabled={isLoading}
+                    aria-pressed={isLocked}
                   >
-                    {isLoading ? 'CHECKING...' : isLocked ? 'LOCK' : 'CHECK'}
+                    {actionButtonLabel}
                   </button>
                 </form>
 

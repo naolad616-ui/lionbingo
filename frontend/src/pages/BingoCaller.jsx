@@ -20,6 +20,7 @@ import {
 } from '../services/api';
 import { DEFAULT_CALL_INTERVAL_MS } from '../utils/speedSettings';
 import { readStoredClosedValue, resolveClosedValue } from '../utils/closedRules';
+import { clearAllMissedClaims } from '../utils/checkCardSession';
 import { readStoredBetAmount, resolveBetAmount } from '../utils/gameSetupSettings';
 
 const BINGO_ROWS = [
@@ -266,6 +267,7 @@ export default function BingoCaller() {
     setDrawOrder(createShuffledDraw());
     previousCalledCountRef.current = 0;
     stopGameSounds();
+    clearAllMissedClaims();
     await resetGameState('default', snapshot);
     navigate('/bingo', { replace: true });
   }, [calledNumbers, clearIntervalTimer, clearShuffleHideTimer, navigate]);

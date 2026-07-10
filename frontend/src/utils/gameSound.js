@@ -1,5 +1,6 @@
 import {
   isCheckCardCelebrationWin,
+  isCheckCardMissedWin,
   isCheckCardNotWinResult,
 } from './checkCard';
 
@@ -315,6 +316,15 @@ export async function playCheckCardResultSounds({
     await playCheckCardWinSound();
     console.log('[check-card-sound] win.mp3 playback finished');
     return 'win';
+  }
+
+  const missedWin = isCheckCardMissedWin(localCheckResult, priorMiss);
+
+  if (missedWin) {
+    console.log('[check-card-sound] Validation result: Missed win (passed)');
+    const played = await playNotWinSound();
+    console.log('[check-card-sound] not-win.mp3 playback', played ? 'succeeded' : 'failed');
+    return played ? 'missed-win' : 'missed-win-failed';
   }
 
   if (!isCheckCardNotWinResult(localCheckResult, priorProgress, priorMiss)) {
