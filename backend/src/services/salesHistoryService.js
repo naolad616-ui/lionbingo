@@ -1,30 +1,4 @@
-import db from '../config/database.js';
-
-const insertRecord = db.prepare(`
-  INSERT OR IGNORE INTO game_sales_history (
-    session_id,
-    room_id,
-    game_started_at,
-    game_ended_at,
-    final_winning_number,
-    cards_sold,
-    bet_amount,
-    total_collected,
-    commission,
-    winner_payout,
-    cartela_number,
-    matched_pattern,
-    called_count,
-    completion_reason,
-    operator_name
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-const selectBySessionId = db.prepare(`
-  SELECT *
-  FROM game_sales_history
-  WHERE session_id = ?
-`);
+import { GameSalesHistory, getNextSequence } from '../models/index.js';
 
 function normalizeRecord(input = {}) {
   const sessionId = String(input.sessionId ?? input.session_id ?? '').trim();
@@ -85,71 +59,73 @@ function mapRow(row) {
   };
 }
 
-export function appendGameSalesRecord(input) {
+export async function appendGameSalesRecord(input) {
   const record = normalizeRecord(input);
   if (!record) {
     return { ok: false, error: 'Invalid sales history record' };
   }
 
-  const existing = selectBySessionId.get(record.sessionId);
+  const existing = await GameSalesHistory.findOne({ session_id: record.sessionId }).lean();
   if (existing) {
     return { ok: true, created: false, record: mapRow(existing) };
   }
 
-  insertRecord.run(
-    record.sessionId,
-    record.roomId,
-    record.gameStartedAt,
-    record.gameEndedAt,
-    record.finalWinningNumber,
-    record.cardsSold,
-    record.betAmount,
-    record.totalCollected,
-    record.commission,
-    record.winnerPayout,
-    record.cartelaNumber,
-    record.matchedPattern,
-    record.calledCount,
-    record.completionReason,
-    record.operatorName,
-  );
+  const id = await getNextSequence('game_sales_history');
 
-  const saved = selectBySessionId.get(record.sessionId);
-  return { ok: true, created: true, record: mapRow(saved) };
+  try {
+    const saved = await GameSalesHistory.create({
+      id,
+      session_id: record.sessionId,
+      room_id: record.roomId,
+      game_started_at: record.gameStartedAt,
+      game_ended_at: record.gameEndedAt,
+      final_winning_number: record.finalWinningNumber,
+      cards_sold: record.cardsSold,
+      bet_amount: record.betAmount,
+      total_collected: record.totalCollected,
+      commission: record.commission,
+      winner_payout: record.winnerPayout,
+      cartela_number: record.cartelaNumber,
+      matched_pattern: record.matchedPattern,
+      called_count: record.calledCount,
+      completion_reason: record.completionReason,
+      operator_name: record.operatorName,
+      created_at: new Date().toISOString(),
+    });
+
+    return { ok: true, created: true, record: mapRow(saved.toObject()) };
+  } catch (error) {
+    if (error?.code === 11000) {
+      const raced = await GameSalesHistory.findOne({ session_id: record.sessionId }).lean();
+      return { ok: true, created: false, record: mapRow(raced) };
+    }
+    throw error;
+  }
 }
 
-function buildHistoryQuery({ period = 'all', date = null }) {
+function buildHistoryFilter({ period = 'all', date = null }) {
   const normalizedPeriod = String(period || 'all').toLowerCase();
-  const conditions = [];
-  const params = [];
+  const filter = {};
 
   if (normalizedPeriod === 'day' && date) {
-    conditions.push(`strftime('%Y-%m-%d', game_ended_at) = ?`);
-    params.push(String(date));
+    const day = String(date).slice(0, 10);
+    filter.game_ended_at = { $regex: `^${day}` };
   } else if (normalizedPeriod === 'month' && date) {
     const monthValue = String(date).slice(0, 7);
-    conditions.push(`strftime('%Y-%m', game_ended_at) = ?`);
-    params.push(monthValue);
+    filter.game_ended_at = { $regex: `^${monthValue}` };
   } else if (normalizedPeriod === 'year' && date) {
     const yearValue = String(date).slice(0, 4);
-    conditions.push(`strftime('%Y', game_ended_at) = ?`);
-    params.push(yearValue);
+    filter.game_ended_at = { $regex: `^${yearValue}` };
   }
 
-  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const sql = `
-    SELECT *
-    FROM game_sales_history
-    ${whereClause}
-    ORDER BY datetime(game_started_at) ASC, id ASC
-  `;
-
-  return { sql, params, period: normalizedPeriod };
+  return { filter, period: normalizedPeriod };
 }
 
-export function queryGameSalesHistory(filters = {}) {
-  const { sql, params, period } = buildHistoryQuery(filters);
-  const rows = db.prepare(sql).all(...params);
+export async function queryGameSalesHistory(filters = {}) {
+  const { filter, period } = buildHistoryFilter(filters);
+  const rows = await GameSalesHistory.find(filter)
+    .sort({ game_started_at: 1, id: 1 })
+    .lean();
 
   return {
     period,

@@ -1,21 +1,6 @@
-import db from '../config/database.js';
+import { getNextSequence, WinnerResult } from '../models/index.js';
 
-const insertWinnerResult = db.prepare(`
-  INSERT INTO winner_results (
-    room_id,
-    cartela_number,
-    total_pool,
-    winner_payout,
-    house_profit,
-    commission_rate,
-    commission_tier_id,
-    commission_tier_label,
-    cards_sold,
-    matched_pattern
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-export function recordWinnerSettlement({
+export async function recordWinnerSettlement({
   roomId,
   cartelaNumber,
   prize,
@@ -35,24 +20,28 @@ export function recordWinnerSettlement({
     recordedAt: new Date().toISOString(),
   };
 
-  insertWinnerResult.run(
-    settlement.roomId,
-    settlement.cartelaNumber,
-    settlement.totalPool,
-    settlement.winnerPayout,
-    settlement.houseProfit,
-    settlement.commissionRate,
-    settlement.commissionTierId,
-    settlement.commissionTierLabel,
-    settlement.cardsSold,
-    settlement.matchedPattern,
-  );
+  const id = await getNextSequence('winner_results');
+
+  await WinnerResult.create({
+    id,
+    room_id: settlement.roomId,
+    cartela_number: settlement.cartelaNumber,
+    total_pool: settlement.totalPool,
+    winner_payout: settlement.winnerPayout,
+    house_profit: settlement.houseProfit,
+    commission_rate: settlement.commissionRate,
+    commission_tier_id: settlement.commissionTierId,
+    commission_tier_label: settlement.commissionTierLabel,
+    cards_sold: settlement.cardsSold,
+    matched_pattern: settlement.matchedPattern,
+    created_at: settlement.recordedAt,
+  });
 
   console.log('[winner-settlement]', JSON.stringify(settlement));
   return settlement;
 }
 
-export function finalizeValidatedWinner(room, result, cartelaNumber) {
+export async function finalizeValidatedWinner(room, result, cartelaNumber) {
   if (!result.valid) {
     return result;
   }
@@ -60,7 +49,7 @@ export function finalizeValidatedWinner(room, result, cartelaNumber) {
   const prize = room.refreshPrizePool();
   room.pause();
 
-  const settlement = recordWinnerSettlement({
+  const settlement = await recordWinnerSettlement({
     roomId: room.roomId,
     cartelaNumber,
     prize,
@@ -74,4 +63,12 @@ export function finalizeValidatedWinner(room, result, cartelaNumber) {
     prize,
     settlement,
   };
+}
+
+export async function listWinnerResults(limit = 200) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500);
+  return WinnerResult.find({})
+    .sort({ created_at: -1, id: -1 })
+    .limit(safeLimit)
+    .lean();
 }

@@ -9,8 +9,8 @@ function extractToken(req) {
   return req.body?.token || req.query?.token || null;
 }
 
-export function postLogin(req, res) {
-  const result = loginUser({
+export async function postLogin(req, res) {
+  const result = await loginUser({
     username: req.body?.username,
     password: req.body?.password,
   });
@@ -27,9 +27,9 @@ export function postLogin(req, res) {
   });
 }
 
-export function getSession(req, res) {
+export async function getSession(req, res) {
   const token = extractToken(req);
-  const session = getSessionUser(token);
+  const session = await getSessionUser(token);
 
   if (!session) {
     res.status(401).json({ error: 'Session expired or invalid.' });
@@ -43,8 +43,8 @@ export function getSession(req, res) {
   });
 }
 
-export function postLogout(req, res) {
+export async function postLogout(req, res) {
   const token = extractToken(req);
-  logoutUser(token);
+  await logoutUser(token);
   res.json({ ok: true });
 }

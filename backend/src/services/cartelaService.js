@@ -2,25 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import XLSX from 'xlsx';
-import db from '../config/database.js';
+import { Cartela } from '../models/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(__dirname, '../../data');
 const xlsxPath = path.join(dataDir, 'arada.xlsx');
 const EXPECTED_CARD_COUNT = 150;
 const SUCCESS_LOG_MESSAGE = '150 unique Bingo cards loaded successfully';
-
-const countCartelas = db.prepare('SELECT COUNT(*) AS count FROM cartelas');
-const deleteAllCartelas = db.prepare('DELETE FROM cartelas');
-const upsertCartela = db.prepare(`
-  INSERT INTO cartelas (card_id, grid, updated_at)
-  VALUES (?, ?, datetime('now'))
-  ON CONFLICT(card_id) DO UPDATE SET
-    grid = excluded.grid,
-    updated_at = datetime('now')
-`);
-const selectCartela = db.prepare('SELECT card_id, grid FROM cartelas WHERE card_id = ?');
-const selectAllCartelas = db.prepare('SELECT card_id, grid FROM cartelas ORDER BY card_id');
 
 const GRID_FIELDS = [
   ['b1', 'i1', 'n1', 'g1', 'o1'],
@@ -37,6 +25,9 @@ const COLUMN_RANGES = [
   { min: 46, max: 60 },
   { min: 61, max: 75 },
 ];
+
+/** @type {Map<number, number[][]>} */
+const cartelaMemoryCache = new Map();
 
 function rowToGrid(row) {
   return GRID_FIELDS.map((fields) =>
@@ -122,9 +113,15 @@ function readWorkbookRows() {
   return { rows, sheetName };
 }
 
-function verifyImportedCartelas() {
-  const imported = selectAllCartelas.all();
-  const importedIds = imported.map((row) => row.card_id);
+function setMemoryCacheFromDocs(docs) {
+  cartelaMemoryCache.clear();
+  for (const doc of docs) {
+    cartelaMemoryCache.set(Number(doc.card_id), doc.grid);
+  }
+}
+
+function verifyImportedCartelas(docs) {
+  const importedIds = docs.map((row) => Number(row.card_id));
   const importedSet = new Set(importedIds);
   const missing = [];
   const duplicateIds = importedIds.filter((id, index) => importedIds.indexOf(id) !== index);
@@ -147,39 +144,40 @@ function verifyImportedCartelas() {
     );
   }
 
-  if (imported.length !== EXPECTED_CARD_COUNT) {
+  if (docs.length !== EXPECTED_CARD_COUNT) {
     throw new Error(
-      `Cartela import verification failed: expected ${EXPECTED_CARD_COUNT} cards, found ${imported.length}`,
+      `Cartela import verification failed: expected ${EXPECTED_CARD_COUNT} cards, found ${docs.length}`,
     );
   }
 
-  const card149 = imported.find((row) => row.card_id === 149);
-  const card150 = imported.find((row) => row.card_id === 150);
+  const card149 = docs.find((row) => Number(row.card_id) === 149);
+  const card150 = docs.find((row) => Number(row.card_id) === 150);
 
   if (!card149 || !card150) {
     throw new Error('Cartela import verification failed: cardId 149 and/or 150 is missing');
   }
 
-  if (card149.grid === card150.grid) {
+  if (JSON.stringify(card149.grid) === JSON.stringify(card150.grid)) {
     throw new Error('Cartela import verification failed: cardId 149 and cardId 150 are duplicates');
   }
 
   const gridOwners = new Map();
 
-  for (const row of imported) {
-    const owner = gridOwners.get(row.grid);
+  for (const row of docs) {
+    const key = JSON.stringify(row.grid);
+    const owner = gridOwners.get(key);
     if (owner !== undefined) {
       throw new Error(
         `Cartela import verification failed: cardId ${row.card_id} duplicates cardId ${owner}`,
       );
     }
-    gridOwners.set(row.grid, row.card_id);
+    gridOwners.set(key, row.card_id);
   }
 
   return EXPECTED_CARD_COUNT;
 }
 
-function importCartelasFromWorkbook() {
+async function importCartelasFromWorkbook() {
   clearWorkbookCartelaCache();
   const { rows, sheetName } = readWorkbookRows();
   const invalidRows = [];
@@ -189,11 +187,7 @@ function importCartelasFromWorkbook() {
   rows.forEach((row, index) => {
     const rowNumber = index + 2;
 
-    if (isRowEmpty(row)) {
-      return;
-    }
-
-    if (isHeaderRow(row)) {
+    if (isRowEmpty(row) || isHeaderRow(row)) {
       return;
     }
 
@@ -220,8 +214,7 @@ function importCartelasFromWorkbook() {
       return;
     }
 
-    const grid = rowToGrid(row);
-    staged.set(cardId, { cardId, grid });
+    staged.set(cardId, { cardId, grid: rowToGrid(row) });
   });
 
   for (const entry of invalidRows) {
@@ -240,28 +233,35 @@ function importCartelasFromWorkbook() {
     );
   }
 
-  deleteAllCartelas.run();
+  await Cartela.deleteMany({});
 
-  for (const { cardId, grid } of staged.values()) {
-    upsertCartela.run(cardId, JSON.stringify(grid));
-  }
+  const now = new Date().toISOString();
+  const docs = [...staged.values()].map(({ cardId, grid }) => ({
+    card_id: cardId,
+    grid,
+    updated_at: now,
+  }));
 
-  verifyImportedCartelas();
+  await Cartela.insertMany(docs, { ordered: true });
+  verifyImportedCartelas(docs);
+  setMemoryCacheFromDocs(docs);
   console.log(SUCCESS_LOG_MESSAGE);
   return EXPECTED_CARD_COUNT;
 }
 
-function isCartelaSetComplete() {
+async function isCartelaSetComplete() {
   try {
-    verifyImportedCartelas();
+    const docs = await Cartela.find({}).sort({ card_id: 1 }).lean();
+    verifyImportedCartelas(docs);
+    setMemoryCacheFromDocs(docs);
     return true;
   } catch {
     return false;
   }
 }
 
-export function initializeCartelas() {
-  if (isCartelaSetComplete()) {
+export async function initializeCartelas() {
+  if (await isCartelaSetComplete()) {
     console.log(
       `[cartelas] ${SUCCESS_LOG_MESSAGE} (verified in database; source workbook: ${xlsxPath})`,
     );
@@ -311,17 +311,13 @@ export function getCartelaById(cardId) {
   const parsedId = Number.parseInt(String(cardId), 10);
   if (!Number.isInteger(parsedId) || parsedId <= 0) return null;
 
-  const row = selectCartela.get(parsedId);
-  if (!row) return null;
+  const grid = cartelaMemoryCache.get(parsedId);
+  if (!grid) return null;
 
-  try {
-    return {
-      cardId: row.card_id,
-      grid: JSON.parse(row.grid),
-    };
-  } catch {
-    return null;
-  }
+  return {
+    cardId: parsedId,
+    grid,
+  };
 }
 
 let workbookCartelaCache = null;

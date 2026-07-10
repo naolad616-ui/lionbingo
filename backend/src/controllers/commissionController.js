@@ -5,9 +5,9 @@ export function getCommission(_req, res) {
   res.json({ tiers: getCommissionTiers() });
 }
 
-export function updateCommission(req, res) {
+export async function updateCommission(req, res) {
   const payload = req.body?.tiers ?? req.body ?? {};
-  const tiers = saveCommissionTiers(payload);
+  const tiers = await saveCommissionTiers(payload);
 
   const io = req.app.get('io');
   if (io) {

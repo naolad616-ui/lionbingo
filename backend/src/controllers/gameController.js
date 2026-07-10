@@ -200,7 +200,7 @@ export function checkCartela(req, res) {
   res.json(result);
 }
 
-export function claimBingo(req, res) {
+export async function claimBingo(req, res) {
   const roomId = getRoomId(req.body?.roomId);
   const cartelaNumber = req.body?.cartelaNumber ?? req.body?.cartelaNo;
 
@@ -218,7 +218,7 @@ export function claimBingo(req, res) {
   if (result.valid) {
     const io = req.app.get('io');
     const room = roomManager.getRoom(roomId);
-    const finalized = finalizeValidatedWinner(room, result, cartelaNumber);
+    const finalized = await finalizeValidatedWinner(room, result, cartelaNumber);
     Object.assign(result, finalized);
     if (io) {
       io.to(roomId).emit('bingo:validated', result);

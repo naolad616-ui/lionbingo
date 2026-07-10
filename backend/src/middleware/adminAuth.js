@@ -9,18 +9,22 @@ export function extractBearerToken(req) {
   return header.slice(7).trim() || null;
 }
 
-export function requireAdminAuth(req, res, next) {
-  const token = extractBearerToken(req);
-  const session = getAdminSession(token);
+export async function requireAdminAuth(req, res, next) {
+  try {
+    const token = extractBearerToken(req);
+    const session = await getAdminSession(token);
 
-  if (!session) {
-    return res.status(401).json({ error: 'Admin authentication required.' });
+    if (!session) {
+      return res.status(401).json({ error: 'Admin authentication required.' });
+    }
+
+    req.admin = session.profile;
+    req.adminToken = session.token;
+    req.adminExpiresAt = session.expiresAt;
+    return next();
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Admin auth failed.' });
   }
-
-  req.admin = session.profile;
-  req.adminToken = session.token;
-  req.adminExpiresAt = session.expiresAt;
-  return next();
 }
 
 export function requireAdminPermission(permission) {

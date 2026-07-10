@@ -1,64 +1,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import db from '../config/database.js';
 import {
   DEFAULT_GAME_NAME,
   DEFAULT_GAME_PASSWORD,
   DEFAULT_GAME_USERNAME,
 } from '../constants/userDefaults.js';
+import { User } from '../models/index.js';
 import { hashPassword, verifyPassword } from '../utils/password.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = path.resolve(__dirname, '../../data/uploads/avatars');
 const DEFAULT_USER_ID = 1;
 
-const selectProfile = db.prepare(`
-  SELECT id, name, username, avatar_path, password_set_by_user, created_at, updated_at
-  FROM users
-  WHERE id = ?
-`);
+function nowIso() {
+  return new Date().toISOString();
+}
 
-const selectAuth = db.prepare(`
-  SELECT id, name, username, password_hash, avatar_path, password_set_by_user, created_at, updated_at
-  FROM users
-  WHERE id = ?
-`);
-
-const selectByUsername = db.prepare(`
-  SELECT id
-  FROM users
-  WHERE username = ? AND id != ?
-`);
-
-const insertUser = db.prepare(`
-  INSERT INTO users (id, name, username, password_hash, avatar_path, password_set_by_user)
-  VALUES (?, ?, ?, ?, NULL, 0)
-`);
-
-const updateProfileStmt = db.prepare(`
-  UPDATE users
-  SET name = ?, username = ?, updated_at = datetime('now')
-  WHERE id = ?
-`);
-
-const updatePasswordStmt = db.prepare(`
-  UPDATE users
-  SET password_hash = ?, password_set_by_user = 1, updated_at = datetime('now')
-  WHERE id = ?
-`);
-
-const updateAvatarStmt = db.prepare(`
-  UPDATE users
-  SET avatar_path = ?, updated_at = datetime('now')
-  WHERE id = ?
-`);
-
-const repairBootstrapUserStmt = db.prepare(`
-  UPDATE users
-  SET name = ?, username = ?, password_hash = ?, password_set_by_user = 0, updated_at = datetime('now')
-  WHERE id = ?
-`);
+function toProfile(doc) {
+  if (!doc) return null;
+  return {
+    id: doc.id,
+    name: doc.name,
+    username: doc.username,
+    avatar_path: doc.avatar_path ?? null,
+    password_set_by_user: Number(doc.password_set_by_user ?? 0),
+    created_at: doc.created_at,
+    updated_at: doc.updated_at,
+  };
+}
 
 function normalizeName(value) {
   return String(value ?? '').trim();
@@ -120,60 +90,76 @@ export function ensureUploadsDir() {
   }
 }
 
-function repairBootstrapUserIfNeeded(existing) {
+async function repairBootstrapUserIfNeeded(existing) {
   if (!existing || existing.password_set_by_user) {
-    return existing;
+    return toProfile(existing);
   }
 
-  const auth = selectAuth.get(DEFAULT_USER_ID);
   const hasBootstrapCredentials =
-    auth &&
-    auth.username === DEFAULT_GAME_USERNAME &&
-    verifyPassword(DEFAULT_GAME_PASSWORD, auth.password_hash);
+    existing.username === DEFAULT_GAME_USERNAME
+    && verifyPassword(DEFAULT_GAME_PASSWORD, existing.password_hash);
 
   if (hasBootstrapCredentials) {
-    return existing;
+    return toProfile(existing);
   }
 
-  repairBootstrapUserStmt.run(
-    DEFAULT_GAME_NAME,
-    DEFAULT_GAME_USERNAME,
-    hashPassword(DEFAULT_GAME_PASSWORD),
-    DEFAULT_USER_ID,
-  );
+  const updated = await User.findOneAndUpdate(
+    { id: DEFAULT_USER_ID },
+    {
+      $set: {
+        name: DEFAULT_GAME_NAME,
+        username: DEFAULT_GAME_USERNAME,
+        password_hash: hashPassword(DEFAULT_GAME_PASSWORD),
+        password_set_by_user: 0,
+        updated_at: nowIso(),
+      },
+    },
+    { new: true },
+  ).lean();
 
-  console.log(
-    `[user] Repaired bootstrap game user "${DEFAULT_GAME_USERNAME}"`,
-  );
-
-  return selectProfile.get(DEFAULT_USER_ID);
+  console.log(`[user] Repaired bootstrap game user "${DEFAULT_GAME_USERNAME}"`);
+  return toProfile(updated);
 }
 
-export function ensureDefaultUser() {
+export async function ensureDefaultUser() {
   ensureUploadsDir();
 
-  const existing = selectProfile.get(DEFAULT_USER_ID);
+  const existing = await User.findOne({ id: DEFAULT_USER_ID }).lean();
   if (existing) {
     return repairBootstrapUserIfNeeded(existing);
   }
 
-  insertUser.run(
-    DEFAULT_USER_ID,
-    DEFAULT_GAME_NAME,
-    DEFAULT_GAME_USERNAME,
-    hashPassword(DEFAULT_GAME_PASSWORD),
-  );
+  const created = await User.create({
+    id: DEFAULT_USER_ID,
+    name: DEFAULT_GAME_NAME,
+    username: DEFAULT_GAME_USERNAME,
+    password_hash: hashPassword(DEFAULT_GAME_PASSWORD),
+    avatar_path: null,
+    password_set_by_user: 0,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  });
+
   console.log(`[user] Seeded bootstrap game user "${DEFAULT_GAME_USERNAME}"`);
-  return selectProfile.get(DEFAULT_USER_ID);
+  return toProfile(created.toObject());
 }
 
-export function getUserProfile() {
-  ensureDefaultUser();
-  return selectProfile.get(DEFAULT_USER_ID) ?? null;
+export async function getUserProfile() {
+  await ensureDefaultUser();
+  const user = await User.findOne({ id: DEFAULT_USER_ID }).lean();
+  return toProfile(user);
 }
 
-export function updateUserProfile({ name, username }) {
-  ensureDefaultUser();
+export async function getUserAuthById(userId = DEFAULT_USER_ID) {
+  return User.findOne({ id: userId }).lean();
+}
+
+export async function getUserAuthByUsername(username) {
+  return User.findOne({ username: String(username ?? '').trim() }).lean();
+}
+
+export async function updateUserProfile({ name, username }) {
+  await ensureDefaultUser();
 
   const nameResult = validateName(name);
   if (!nameResult.ok) {
@@ -185,19 +171,33 @@ export function updateUserProfile({ name, username }) {
     return usernameResult;
   }
 
-  const duplicate = selectByUsername.get(usernameResult.value, DEFAULT_USER_ID);
+  const duplicate = await User.findOne({
+    username: usernameResult.value,
+    id: { $ne: DEFAULT_USER_ID },
+  }).lean();
+
   if (duplicate) {
     return { ok: false, error: 'Username is already taken.' };
   }
 
-  updateProfileStmt.run(nameResult.value, usernameResult.value, DEFAULT_USER_ID);
-  return { ok: true, profile: getUserProfile() };
+  await User.updateOne(
+    { id: DEFAULT_USER_ID },
+    {
+      $set: {
+        name: nameResult.value,
+        username: usernameResult.value,
+        updated_at: nowIso(),
+      },
+    },
+  );
+
+  return { ok: true, profile: await getUserProfile() };
 }
 
-export function changeUserPassword({ oldPassword, newPassword }) {
-  ensureDefaultUser();
+export async function changeUserPassword({ oldPassword, newPassword }) {
+  await ensureDefaultUser();
 
-  const auth = selectAuth.get(DEFAULT_USER_ID);
+  const auth = await getUserAuthById(DEFAULT_USER_ID);
   if (!auth) {
     return { ok: false, error: 'User account not found.' };
   }
@@ -219,14 +219,24 @@ export function changeUserPassword({ oldPassword, newPassword }) {
     return passwordResult;
   }
 
-  updatePasswordStmt.run(hashPassword(passwordResult.value), DEFAULT_USER_ID);
+  await User.updateOne(
+    { id: DEFAULT_USER_ID },
+    {
+      $set: {
+        password_hash: hashPassword(passwordResult.value),
+        password_set_by_user: 1,
+        updated_at: nowIso(),
+      },
+    },
+  );
+
   return { ok: true };
 }
 
-export function updateUserAvatar(relativePath, absolutePath) {
-  ensureDefaultUser();
+export async function updateUserAvatar(relativePath, absolutePath) {
+  await ensureDefaultUser();
 
-  const current = selectAuth.get(DEFAULT_USER_ID);
+  const current = await getUserAuthById(DEFAULT_USER_ID);
   if (current?.avatar_path) {
     const previousAbsolute = path.join(getUploadsDir(), path.basename(current.avatar_path));
     if (fs.existsSync(previousAbsolute)) {
@@ -234,8 +244,17 @@ export function updateUserAvatar(relativePath, absolutePath) {
     }
   }
 
-  updateAvatarStmt.run(relativePath, DEFAULT_USER_ID);
-  return { ok: true, profile: getUserProfile(), absolutePath };
+  await User.updateOne(
+    { id: DEFAULT_USER_ID },
+    {
+      $set: {
+        avatar_path: relativePath,
+        updated_at: nowIso(),
+      },
+    },
+  );
+
+  return { ok: true, profile: await getUserProfile(), absolutePath };
 }
 
 export function getUploadsDir() {

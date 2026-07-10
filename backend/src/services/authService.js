@@ -1,31 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import db from '../config/database.js';
+import { AuthSession } from '../models/index.js';
 import { verifyPassword } from '../utils/password.js';
-import { ensureDefaultUser, getUserProfile } from './userService.js';
+import {
+  ensureDefaultUser,
+  getUserAuthByUsername,
+  getUserProfile,
+} from './userService.js';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-
-const selectUserByUsername = db.prepare(`
-  SELECT id, name, username, password_hash, avatar_path, password_set_by_user, created_at, updated_at
-  FROM users
-  WHERE username = ?
-`);
-
-const insertSession = db.prepare(`
-  INSERT INTO auth_sessions (token, user_id, expires_at)
-  VALUES (?, ?, ?)
-`);
-
-const selectSession = db.prepare(`
-  SELECT token, user_id, expires_at
-  FROM auth_sessions
-  WHERE token = ?
-`);
-
-const deleteSession = db.prepare(`
-  DELETE FROM auth_sessions
-  WHERE token = ?
-`);
 
 function mapProfile(user) {
   return {
@@ -39,8 +21,8 @@ function mapProfile(user) {
   };
 }
 
-export function loginUser({ username, password }) {
-  ensureDefaultUser();
+export async function loginUser({ username, password }) {
+  await ensureDefaultUser();
 
   const normalizedUsername = String(username ?? '').trim();
   const normalizedPassword = String(password ?? '');
@@ -49,14 +31,20 @@ export function loginUser({ username, password }) {
     return { ok: false, error: 'Username and password are required.' };
   }
 
-  const user = selectUserByUsername.get(normalizedUsername);
+  const user = await getUserAuthByUsername(normalizedUsername);
   if (!user || !verifyPassword(normalizedPassword, user.password_hash)) {
     return { ok: false, error: 'Invalid username or password.' };
   }
 
   const token = randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-  insertSession.run(token, user.id, expiresAt);
+
+  await AuthSession.create({
+    token,
+    user_id: user.id,
+    expires_at: expiresAt,
+    created_at: new Date().toISOString(),
+  });
 
   return {
     ok: true,
@@ -65,26 +53,26 @@ export function loginUser({ username, password }) {
   };
 }
 
-export function getSessionUser(token) {
+export async function getSessionUser(token) {
   if (!token) {
     return null;
   }
 
-  ensureDefaultUser();
+  await ensureDefaultUser();
 
-  const session = selectSession.get(token);
+  const session = await AuthSession.findOne({ token }).lean();
   if (!session) {
     return null;
   }
 
   if (new Date(session.expires_at) < new Date()) {
-    deleteSession.run(token);
+    await AuthSession.deleteOne({ token });
     return null;
   }
 
-  const profile = getUserProfile();
+  const profile = await getUserProfile();
   if (!profile || profile.id !== session.user_id) {
-    deleteSession.run(token);
+    await AuthSession.deleteOne({ token });
     return null;
   }
 
@@ -102,9 +90,9 @@ export function getSessionUser(token) {
   };
 }
 
-export function logoutUser(token) {
+export async function logoutUser(token) {
   if (token) {
-    deleteSession.run(token);
+    await AuthSession.deleteOne({ token });
   }
 
   return { ok: true };

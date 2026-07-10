@@ -19,8 +19,8 @@ function sendProfile(res, profile) {
   });
 }
 
-export function getProfile(req, res) {
-  const profile = getUserProfile();
+export async function getProfile(req, res) {
+  const profile = await getUserProfile();
   if (!profile) {
     res.status(404).json({ error: 'User profile not found.' });
     return;
@@ -29,8 +29,8 @@ export function getProfile(req, res) {
   sendProfile(res, profile);
 }
 
-export function patchProfile(req, res) {
-  const result = updateUserProfile({
+export async function patchProfile(req, res) {
+  const result = await updateUserProfile({
     name: req.body?.name,
     username: req.body?.username,
   });
@@ -43,7 +43,7 @@ export function patchProfile(req, res) {
   sendProfile(res, result.profile);
 }
 
-export function postChangePassword(req, res) {
+export async function postChangePassword(req, res) {
   const oldPassword = req.body?.oldPassword;
   const newPassword = req.body?.newPassword;
   const confirmPassword = req.body?.confirmPassword;
@@ -64,7 +64,7 @@ export function postChangePassword(req, res) {
     return;
   }
 
-  const result = changeUserPassword({
+  const result = await changeUserPassword({
     oldPassword,
     newPassword: passwordResult.value,
   });
@@ -76,7 +76,7 @@ export function postChangePassword(req, res) {
   res.json({ ok: true, message: 'Password changed successfully.' });
 }
 
-export function postAvatar(req, res) {
+export async function postAvatar(req, res) {
   if (!req.file) {
     res.status(400).json({ error: 'Profile photo file is required.' });
     return;
@@ -85,7 +85,7 @@ export function postAvatar(req, res) {
   const relativePath = `/uploads/avatars/${req.file.filename}`;
 
   try {
-    const result = updateUserAvatar(relativePath, req.file.path);
+    const result = await updateUserAvatar(relativePath, req.file.path);
     sendProfile(res, result.profile);
   } catch (error) {
     removeUploadedFile(req.file.path);

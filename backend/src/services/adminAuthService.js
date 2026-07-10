@@ -1,6 +1,4 @@
 import { randomBytes } from 'node:crypto';
-import db from '../config/database.js';
-import { hashPassword, verifyPassword } from '../utils/password.js';
 import {
   ADMIN_ROLES,
   ROLE_LABELS,
@@ -11,102 +9,27 @@ import {
   DEFAULT_ADMIN_PASSWORD,
   DEFAULT_ADMIN_USERNAME,
 } from '../constants/adminDefaults.js';
+import {
+  AdminLoginHistory,
+  AdminSession,
+  AdminUser,
+  getNextSequence,
+} from '../models/index.js';
+import { hashPassword, verifyPassword } from '../utils/password.js';
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
-const selectAdminByUsername = db.prepare(`
-  SELECT *
-  FROM admin_users
-  WHERE username = ?
-`);
-
-const selectAdminById = db.prepare(`
-  SELECT *
-  FROM admin_users
-  WHERE id = ?
-`);
-
-const selectAllAdmins = db.prepare(`
-  SELECT *
-  FROM admin_users
-  ORDER BY datetime(created_at) ASC, id ASC
-`);
-
-const insertAdmin = db.prepare(`
-  INSERT INTO admin_users (name, username, password_hash, role, permissions, is_active)
-  VALUES (?, ?, ?, ?, ?, 1)
-`);
-
-const updateAdminPassword = db.prepare(`
-  UPDATE admin_users
-  SET password_hash = ?, updated_at = datetime('now')
-  WHERE id = ?
-`);
-
-const updateAdminActive = db.prepare(`
-  UPDATE admin_users
-  SET is_active = ?, updated_at = datetime('now')
-  WHERE id = ?
-`);
-
-const updateAdminPermissions = db.prepare(`
-  UPDATE admin_users
-  SET permissions = ?, role = ?, name = ?, updated_at = datetime('now')
-  WHERE id = ?
-`);
-
-const insertSession = db.prepare(`
-  INSERT INTO admin_sessions (token, admin_id, expires_at)
-  VALUES (?, ?, ?)
-`);
-
-const selectSession = db.prepare(`
-  SELECT token, admin_id, expires_at
-  FROM admin_sessions
-  WHERE token = ?
-`);
-
-const deleteSession = db.prepare(`
-  DELETE FROM admin_sessions
-  WHERE token = ?
-`);
-
-const deleteSessionsForAdmin = db.prepare(`
-  DELETE FROM admin_sessions
-  WHERE admin_id = ?
-`);
-
-const insertLoginHistory = db.prepare(`
-  INSERT INTO admin_login_history (admin_id, username, action, ip_address, user_agent, success, details)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
-`);
-
-const selectLoginHistory = db.prepare(`
-  SELECT *
-  FROM admin_login_history
-  ORDER BY datetime(created_at) DESC, id DESC
-  LIMIT ?
-`);
-
-const countSuperAdmins = db.prepare(`
-  SELECT COUNT(*) AS total
-  FROM admin_users
-  WHERE role = 'super_admin' AND is_active = 1
-`);
-
-function parsePermissions(raw) {
-  try {
-    const parsed = JSON.parse(raw || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+function nowIso() {
+  return new Date().toISOString();
 }
 
 function mapAdmin(row) {
   if (!row) return null;
 
-  const permissions = resolvePermissionsForRole(row.role, parsePermissions(row.permissions));
+  const permissions = resolvePermissionsForRole(
+    row.role,
+    Array.isArray(row.permissions) ? row.permissions : [],
+  );
 
   return {
     id: row.id,
@@ -135,7 +58,7 @@ function mapLoginHistory(row) {
   };
 }
 
-export function recordAdminActivity({
+export async function recordAdminActivity({
   adminId = null,
   username,
   action,
@@ -144,61 +67,76 @@ export function recordAdminActivity({
   success = true,
   details = null,
 }) {
-  insertLoginHistory.run(
-    adminId,
-    String(username || 'unknown'),
-    String(action || 'activity'),
-    ipAddress,
-    userAgent,
-    success ? 1 : 0,
+  const id = await getNextSequence('admin_login_history');
+  await AdminLoginHistory.create({
+    id,
+    admin_id: adminId,
+    username: String(username || 'unknown'),
+    action: String(action || 'activity'),
+    ip_address: ipAddress,
+    user_agent: userAgent,
+    success: success ? 1 : 0,
     details,
-  );
+    created_at: nowIso(),
+  });
 }
 
-export function ensureDefaultAdmin() {
-  const activeSuperAdmins = countSuperAdmins.get().total;
-  const existing = selectAdminByUsername.get(DEFAULT_ADMIN_USERNAME);
-  const bootstrapPermissions = JSON.stringify(
-    resolvePermissionsForRole(ADMIN_ROLES.SUPER_ADMIN),
-  );
+export async function ensureDefaultAdmin() {
+  const activeSuperAdmins = await AdminUser.countDocuments({
+    role: ADMIN_ROLES.SUPER_ADMIN,
+    is_active: 1,
+  });
+  const existing = await AdminUser.findOne({ username: DEFAULT_ADMIN_USERNAME }).lean();
+  const bootstrapPermissions = resolvePermissionsForRole(ADMIN_ROLES.SUPER_ADMIN);
 
   if (existing) {
     if (activeSuperAdmins === 0) {
-      updateAdminPassword.run(hashPassword(DEFAULT_ADMIN_PASSWORD), existing.id);
-      updateAdminPermissions.run(
-        bootstrapPermissions,
-        ADMIN_ROLES.SUPER_ADMIN,
-        DEFAULT_ADMIN_NAME,
-        existing.id,
+      await AdminUser.updateOne(
+        { id: existing.id },
+        {
+          $set: {
+            password_hash: hashPassword(DEFAULT_ADMIN_PASSWORD),
+            permissions: bootstrapPermissions,
+            role: ADMIN_ROLES.SUPER_ADMIN,
+            name: DEFAULT_ADMIN_NAME,
+            is_active: 1,
+            updated_at: nowIso(),
+          },
+        },
       );
-      updateAdminActive.run(1, existing.id);
       console.log(`[admin] Repaired bootstrap super admin "${DEFAULT_ADMIN_USERNAME}"`);
-      return mapAdmin(selectAdminById.get(existing.id));
+      const repaired = await AdminUser.findOne({ id: existing.id }).lean();
+      return mapAdmin(repaired);
     }
 
     return mapAdmin(existing);
   }
 
-  const result = insertAdmin.run(
-    DEFAULT_ADMIN_NAME,
-    DEFAULT_ADMIN_USERNAME,
-    hashPassword(DEFAULT_ADMIN_PASSWORD),
-    ADMIN_ROLES.SUPER_ADMIN,
-    bootstrapPermissions,
-  );
+  const id = await getNextSequence('admin_users');
+  const created = await AdminUser.create({
+    id,
+    name: DEFAULT_ADMIN_NAME,
+    username: DEFAULT_ADMIN_USERNAME,
+    password_hash: hashPassword(DEFAULT_ADMIN_PASSWORD),
+    role: ADMIN_ROLES.SUPER_ADMIN,
+    permissions: bootstrapPermissions,
+    is_active: 1,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  });
 
   console.log(`[admin] Seeded bootstrap super admin "${DEFAULT_ADMIN_USERNAME}"`);
-  return mapAdmin(selectAdminById.get(Number(result.lastInsertRowid)));
+  return mapAdmin(created.toObject());
 }
 
-export function loginAdmin({ username, password, ipAddress = null, userAgent = null }) {
-  ensureDefaultAdmin();
+export async function loginAdmin({ username, password, ipAddress = null, userAgent = null }) {
+  await ensureDefaultAdmin();
 
   const normalizedUsername = String(username ?? '').trim();
   const normalizedPassword = String(password ?? '');
 
   if (!normalizedUsername || !normalizedPassword) {
-    recordAdminActivity({
+    await recordAdminActivity({
       username: normalizedUsername || 'unknown',
       action: 'login_failed',
       ipAddress,
@@ -209,9 +147,9 @@ export function loginAdmin({ username, password, ipAddress = null, userAgent = n
     return { ok: false, error: 'Username and password are required.' };
   }
 
-  const admin = selectAdminByUsername.get(normalizedUsername);
+  const admin = await AdminUser.findOne({ username: normalizedUsername }).lean();
   if (!admin || !admin.is_active || !verifyPassword(normalizedPassword, admin.password_hash)) {
-    recordAdminActivity({
+    await recordAdminActivity({
       adminId: admin?.id ?? null,
       username: normalizedUsername,
       action: 'login_failed',
@@ -225,10 +163,15 @@ export function loginAdmin({ username, password, ipAddress = null, userAgent = n
 
   const token = randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-  insertSession.run(token, admin.id, expiresAt);
+  await AdminSession.create({
+    token,
+    admin_id: admin.id,
+    expires_at: expiresAt,
+    created_at: nowIso(),
+  });
 
   const profile = mapAdmin(admin);
-  recordAdminActivity({
+  await recordAdminActivity({
     adminId: profile.id,
     username: profile.username,
     action: 'login',
@@ -246,22 +189,22 @@ export function loginAdmin({ username, password, ipAddress = null, userAgent = n
   };
 }
 
-export function getAdminSession(token) {
+export async function getAdminSession(token) {
   if (!token) return null;
 
-  ensureDefaultAdmin();
+  await ensureDefaultAdmin();
 
-  const session = selectSession.get(token);
+  const session = await AdminSession.findOne({ token }).lean();
   if (!session) return null;
 
   if (new Date(session.expires_at) < new Date()) {
-    deleteSession.run(token);
+    await AdminSession.deleteOne({ token });
     return null;
   }
 
-  const admin = selectAdminById.get(session.admin_id);
+  const admin = await AdminUser.findOne({ id: session.admin_id }).lean();
   if (!admin || !admin.is_active) {
-    deleteSession.run(token);
+    await AdminSession.deleteOne({ token });
     return null;
   }
 
@@ -272,14 +215,14 @@ export function getAdminSession(token) {
   };
 }
 
-export function logoutAdmin(token, meta = {}) {
-  const session = token ? getAdminSession(token) : null;
+export async function logoutAdmin(token, meta = {}) {
+  const session = token ? await getAdminSession(token) : null;
   if (token) {
-    deleteSession.run(token);
+    await AdminSession.deleteOne({ token });
   }
 
   if (session?.profile) {
-    recordAdminActivity({
+    await recordAdminActivity({
       adminId: session.profile.id,
       username: session.profile.username,
       action: 'logout',
@@ -292,8 +235,8 @@ export function logoutAdmin(token, meta = {}) {
   return { ok: true };
 }
 
-export function changeAdminPassword(adminId, currentPassword, newPassword) {
-  const admin = selectAdminById.get(adminId);
+export async function changeAdminPassword(adminId, currentPassword, newPassword) {
+  const admin = await AdminUser.findOne({ id: adminId }).lean();
   if (!admin) {
     return { ok: false, error: 'Admin not found.' };
   }
@@ -307,10 +250,18 @@ export function changeAdminPassword(adminId, currentPassword, newPassword) {
     return { ok: false, error: 'New password must be at least 6 characters.' };
   }
 
-  updateAdminPassword.run(hashPassword(nextPassword), adminId);
-  deleteSessionsForAdmin.run(adminId);
+  await AdminUser.updateOne(
+    { id: adminId },
+    {
+      $set: {
+        password_hash: hashPassword(nextPassword),
+        updated_at: nowIso(),
+      },
+    },
+  );
+  await AdminSession.deleteMany({ admin_id: adminId });
 
-  recordAdminActivity({
+  await recordAdminActivity({
     adminId,
     username: admin.username,
     action: 'password_changed',
@@ -320,7 +271,7 @@ export function changeAdminPassword(adminId, currentPassword, newPassword) {
   return { ok: true };
 }
 
-export function createAdminUser({
+export async function createAdminUser({
   name,
   username,
   password,
@@ -341,23 +292,29 @@ export function createAdminUser({
     return { ok: false, error: 'Password must be at least 6 characters.' };
   }
 
-  if (selectAdminByUsername.get(normalizedUsername)) {
+  const existing = await AdminUser.findOne({ username: normalizedUsername }).lean();
+  if (existing) {
     return { ok: false, error: 'Username already exists.' };
   }
 
   const resolvedPermissions = resolvePermissionsForRole(normalizedRole, permissions);
+  const id = await getNextSequence('admin_users');
 
-  const result = insertAdmin.run(
-    normalizedName,
-    normalizedUsername,
-    hashPassword(normalizedPassword),
-    normalizedRole,
-    JSON.stringify(resolvedPermissions),
-  );
+  const createdDoc = await AdminUser.create({
+    id,
+    name: normalizedName,
+    username: normalizedUsername,
+    password_hash: hashPassword(normalizedPassword),
+    role: normalizedRole,
+    permissions: resolvedPermissions,
+    is_active: 1,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  });
 
-  const created = mapAdmin(selectAdminById.get(Number(result.lastInsertRowid)));
+  const created = mapAdmin(createdDoc.toObject());
 
-  recordAdminActivity({
+  await recordAdminActivity({
     adminId: actor?.id ?? null,
     username: actor?.username ?? 'system',
     action: 'admin_created',
@@ -368,21 +325,27 @@ export function createAdminUser({
   return { ok: true, admin: created };
 }
 
-export function listAdminUsers() {
-  ensureDefaultAdmin();
-  return selectAllAdmins.all().map(mapAdmin);
+export async function listAdminUsers() {
+  await ensureDefaultAdmin();
+  const admins = await AdminUser.find({}).sort({ created_at: 1, id: 1 }).lean();
+  return admins.map(mapAdmin);
 }
 
-export function updateAdminUser(adminId, updates = {}, actor = null) {
-  const admin = selectAdminById.get(adminId);
+export async function updateAdminUser(adminId, updates = {}, actor = null) {
+  const admin = await AdminUser.findOne({ id: adminId }).lean();
   if (!admin) {
     return { ok: false, error: 'Admin not found.' };
   }
 
+  const activeSuperAdmins = await AdminUser.countDocuments({
+    role: ADMIN_ROLES.SUPER_ADMIN,
+    is_active: 1,
+  });
+
   if (
     admin.role === ADMIN_ROLES.SUPER_ADMIN
     && updates.isActive === false
-    && countSuperAdmins.get().total <= 1
+    && activeSuperAdmins <= 1
   ) {
     return { ok: false, error: 'Cannot deactivate the last Super Admin.' };
   }
@@ -396,21 +359,27 @@ export function updateAdminUser(adminId, updates = {}, actor = null) {
     ? Boolean(admin.is_active)
     : Boolean(updates.isActive);
 
-  updateAdminPermissions.run(
-    JSON.stringify(nextPermissions),
-    nextRole,
-    nextName,
-    adminId,
+  await AdminUser.updateOne(
+    { id: adminId },
+    {
+      $set: {
+        permissions: nextPermissions,
+        role: nextRole,
+        name: nextName,
+        is_active: nextActive ? 1 : 0,
+        updated_at: nowIso(),
+      },
+    },
   );
-  updateAdminActive.run(nextActive ? 1 : 0, adminId);
 
   if (!nextActive) {
-    deleteSessionsForAdmin.run(adminId);
+    await AdminSession.deleteMany({ admin_id: adminId });
   }
 
-  const updated = mapAdmin(selectAdminById.get(adminId));
+  const updatedDoc = await AdminUser.findOne({ id: adminId }).lean();
+  const updated = mapAdmin(updatedDoc);
 
-  recordAdminActivity({
+  await recordAdminActivity({
     adminId: actor?.id ?? null,
     username: actor?.username ?? 'system',
     action: 'admin_updated',
@@ -421,7 +390,11 @@ export function updateAdminUser(adminId, updates = {}, actor = null) {
   return { ok: true, admin: updated };
 }
 
-export function getAdminLoginHistory(limit = 100) {
+export async function getAdminLoginHistory(limit = 100) {
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
-  return selectLoginHistory.all(safeLimit).map(mapLoginHistory);
+  const rows = await AdminLoginHistory.find({})
+    .sort({ created_at: -1, id: -1 })
+    .limit(safeLimit)
+    .lean();
+  return rows.map(mapLoginHistory);
 }

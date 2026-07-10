@@ -38,8 +38,8 @@ export function getSoundSettingsHandler(_req, res) {
   });
 }
 
-export function updateSoundSettings(req, res) {
-  const sound = saveSoundSettings(req.body ?? {});
+export async function updateSoundSettings(req, res) {
+  const sound = await saveSoundSettings(req.body ?? {});
   const io = req.app.get('io');
   const roomId = req.body?.roomId || DEFAULT_ROOM_ID;
 
@@ -57,8 +57,8 @@ export function getPatternSettingsHandler(_req, res) {
   res.json(getPatternSettings());
 }
 
-export function updatePatternSettings(req, res) {
-  const patterns = savePatternSettings(req.body ?? {});
+export async function updatePatternSettings(req, res) {
+  const patterns = await savePatternSettings(req.body ?? {});
   const io = req.app.get('io');
   const roomId = req.body?.roomId || DEFAULT_ROOM_ID;
 
@@ -73,7 +73,7 @@ export function getGameSetupSettingsHandler(_req, res) {
   res.json(getGameSetupSettings());
 }
 
-export function updateGameSetupSettings(req, res) {
-  const gameSetup = saveGameSetupSettings(req.body ?? {});
+export async function updateGameSetupSettings(req, res) {
+  const gameSetup = await saveGameSetupSettings(req.body ?? {});
   res.json(gameSetup);
 }

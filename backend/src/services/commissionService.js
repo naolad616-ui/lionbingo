@@ -1,29 +1,13 @@
-import db from '../config/database.js';
 import {
   buildDefaultCommissionMap,
   COMMISSION_SETTINGS_KEY,
   DEFAULT_COMMISSION_TIERS,
 } from '../constants/commissionDefaults.js';
-
-const upsertSetting = db.prepare(`
-  INSERT INTO settings (key, value, updated_at)
-  VALUES (?, ?, datetime('now'))
-  ON CONFLICT(key) DO UPDATE SET
-    value = excluded.value,
-    updated_at = datetime('now')
-`);
-
-const selectSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
+import { readCachedSetting, writeCachedSetting } from './settingsCache.js';
 
 function readSavedMap() {
-  const row = selectSetting.get(COMMISSION_SETTINGS_KEY);
-  if (!row?.value) return {};
-
-  try {
-    return JSON.parse(row.value);
-  } catch {
-    return {};
-  }
+  const saved = readCachedSetting(COMMISSION_SETTINGS_KEY, {});
+  return saved && typeof saved === 'object' ? saved : {};
 }
 
 function normalizeTierValue(value, fallback) {
@@ -49,7 +33,7 @@ export function getCommissionRateMap() {
   }, {});
 }
 
-export function saveCommissionTiers(input) {
+export async function saveCommissionTiers(input) {
   const current = buildDefaultCommissionMap();
   const saved = readSavedMap();
   const base = { ...current, ...saved };
@@ -66,7 +50,7 @@ export function saveCommissionTiers(input) {
     }
   }
 
-  upsertSetting.run(COMMISSION_SETTINGS_KEY, JSON.stringify(base));
+  await writeCachedSetting(COMMISSION_SETTINGS_KEY, base);
   return getCommissionTiers();
 }
 

@@ -16,9 +16,9 @@ import {
   saveCommissionTiers,
 } from '../services/commissionService.js';
 
-export function postAdminLogin(req, res) {
+export async function postAdminLogin(req, res) {
   const meta = getRequestMeta(req);
-  const result = loginAdmin({
+  const result = await loginAdmin({
     username: req.body?.username,
     password: req.body?.password,
     ...meta,
@@ -42,13 +42,13 @@ export function getAdminSessionHandler(req, res) {
   });
 }
 
-export function postAdminLogout(req, res) {
-  logoutAdmin(req.adminToken, getRequestMeta(req));
+export async function postAdminLogout(req, res) {
+  await logoutAdmin(req.adminToken, getRequestMeta(req));
   return res.json({ ok: true });
 }
 
-export function postAdminChangePassword(req, res) {
-  const result = changeAdminPassword(
+export async function postAdminChangePassword(req, res) {
+  const result = await changeAdminPassword(
     req.admin.id,
     req.body?.currentPassword,
     req.body?.newPassword,
@@ -61,13 +61,13 @@ export function postAdminChangePassword(req, res) {
   return res.json({ ok: true });
 }
 
-export function getAdminDashboardHandler(req, res) {
+export async function getAdminDashboardHandler(req, res) {
   const roomId = req.query.roomId || 'default';
-  return res.json(getAdminDashboard(roomId));
+  return res.json(await getAdminDashboard(roomId));
 }
 
-export function getAdminReportsHandler(req, res) {
-  const reports = getAdminReports({
+export async function getAdminReportsHandler(req, res) {
+  const reports = await getAdminReports({
     period: req.query.period,
     date: req.query.date,
     from: req.query.from,
@@ -81,9 +81,9 @@ export function getAdminCommissionHandler(_req, res) {
   return res.json({ tiers: getCommissionTiers() });
 }
 
-export function putAdminCommissionHandler(req, res) {
+export async function putAdminCommissionHandler(req, res) {
   const payload = req.body?.tiers ?? req.body ?? {};
-  const tiers = saveCommissionTiers(payload);
+  const tiers = await saveCommissionTiers(payload);
 
   const io = req.app.get('io');
   if (io) {
@@ -93,9 +93,9 @@ export function putAdminCommissionHandler(req, res) {
   return res.json({ tiers });
 }
 
-export function getAdminsHandler(_req, res) {
+export async function getAdminsHandler(_req, res) {
   return res.json({
-    admins: listAdminUsers(),
+    admins: await listAdminUsers(),
     roles: Object.values(ADMIN_ROLES).map((role) => ({
       id: role,
       label: ROLE_LABELS[role],
@@ -104,8 +104,8 @@ export function getAdminsHandler(_req, res) {
   });
 }
 
-export function postCreateAdminHandler(req, res) {
-  const result = createAdminUser({
+export async function postCreateAdminHandler(req, res) {
+  const result = await createAdminUser({
     name: req.body?.name,
     username: req.body?.username,
     password: req.body?.password,
@@ -121,13 +121,13 @@ export function postCreateAdminHandler(req, res) {
   return res.status(201).json({ admin: result.admin });
 }
 
-export function patchAdminHandler(req, res) {
+export async function patchAdminHandler(req, res) {
   const adminId = Number(req.params.id);
   if (!Number.isFinite(adminId)) {
     return res.status(400).json({ error: 'Invalid admin id.' });
   }
 
-  const result = updateAdminUser(adminId, {
+  const result = await updateAdminUser(adminId, {
     name: req.body?.name,
     role: req.body?.role,
     permissions: req.body?.permissions,
@@ -141,13 +141,13 @@ export function patchAdminHandler(req, res) {
   return res.json({ admin: result.admin });
 }
 
-export function getAdminLoginHistoryHandler(req, res) {
+export async function getAdminLoginHistoryHandler(req, res) {
   const limit = Number(req.query.limit || 100);
-  return res.json({ history: getAdminLoginHistory(limit) });
+  return res.json({ history: await getAdminLoginHistory(limit) });
 }
 
-export function getAdminSettingsHandler(req, res) {
-  const session = getAdminSession(req.adminToken);
+export async function getAdminSettingsHandler(req, res) {
+  const session = await getAdminSession(req.adminToken);
   return res.json({
     profile: session?.profile || req.admin,
     expiresAt: session?.expiresAt || req.adminExpiresAt,

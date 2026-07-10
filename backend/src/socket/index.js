@@ -191,20 +191,20 @@ export function initializeSocket(io) {
       });
     });
 
-    socket.on('commission:save', (payload = {}) => {
-      const tiers = saveCommissionTiers(payload.tiers ?? payload);
+    socket.on('commission:save', async (payload = {}) => {
+      const tiers = await saveCommissionTiers(payload.tiers ?? payload);
       io.emit('commission:updated', { tiers });
     });
 
-    socket.on('settings:save-sound', (payload = {}) => {
+    socket.on('settings:save-sound', async (payload = {}) => {
       const roomId = getRoomId(payload);
-      saveSoundSettings(payload);
+      await saveSoundSettings(payload);
       broadcastSettings(io, roomId);
     });
 
-    socket.on('settings:save-patterns', (payload = {}) => {
+    socket.on('settings:save-patterns', async (payload = {}) => {
       const roomId = getRoomId(payload);
-      savePatternSettings(payload.patterns ?? payload);
+      await savePatternSettings(payload.patterns ?? payload);
       broadcastSettings(io, roomId);
     });
 
@@ -218,7 +218,7 @@ export function initializeSocket(io) {
       socket.emit('check:result', result);
     });
 
-    socket.on('bingo', (payload = {}) => {
+    socket.on('bingo', async (payload = {}) => {
       const roomId = getRoomId(payload);
       const result = validateCartelaForRoom({
         cartelaNumber: payload.cartelaNumber ?? payload.cartelaNo,
@@ -228,7 +228,7 @@ export function initializeSocket(io) {
 
       if (result.valid) {
         const room = roomManager.getRoom(roomId);
-        const finalized = finalizeValidatedWinner(
+        const finalized = await finalizeValidatedWinner(
           room,
           result,
           payload.cartelaNumber ?? payload.cartelaNo,

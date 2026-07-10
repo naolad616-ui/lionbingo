@@ -2,16 +2,9 @@ import { DEFAULT_ROOM_ID } from '../constants/defaults.js';
 import { roomManager } from './gameEngine.js';
 import { getOnlineCount, getOnlineBreakdown } from './presenceService.js';
 import { queryGameSalesHistory } from './salesHistoryService.js';
-import db from '../config/database.js';
+import { listWinnerResults } from './winnerResultService.js';
 
 const TOTAL_CARTELAS = 150;
-
-const selectWinnerHistory = db.prepare(`
-  SELECT *
-  FROM winner_results
-  ORDER BY datetime(created_at) DESC, id DESC
-  LIMIT ?
-`);
 
 function mapWinnerRow(row) {
   return {
@@ -100,7 +93,7 @@ function roundMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
-export function getAdminDashboard(roomId = DEFAULT_ROOM_ID) {
+export async function getAdminDashboard(roomId = DEFAULT_ROOM_ID) {
   const room = roomManager.getRoom(roomId);
   const state = room.getPublicState();
   const sales = state.sales || {};
@@ -112,7 +105,7 @@ export function getAdminDashboard(roomId = DEFAULT_ROOM_ID) {
   const houseCommission = Number(prize.houseCommission ?? 0);
 
   const today = getLocalDateString();
-  const dailyHistory = queryGameSalesHistory({ period: 'day', date: today });
+  const dailyHistory = await queryGameSalesHistory({ period: 'day', date: today });
   const dailySummary = summarizeRecords(dailyHistory.records);
 
   return {
@@ -143,14 +136,14 @@ export function getAdminDashboard(roomId = DEFAULT_ROOM_ID) {
   };
 }
 
-export function getAdminReports({
+export async function getAdminReports({
   period = 'all',
   date = null,
   from = null,
   to = null,
   search = '',
 } = {}) {
-  const history = queryGameSalesHistory({
+  const history = await queryGameSalesHistory({
     period: period === 'week' ? 'all' : period,
     date,
   });
@@ -169,8 +162,7 @@ export function getAdminReports({
   }
 
   const summary = summarizeRecords(records);
-  const winners = selectWinnerHistory
-    .all(200)
+  const winners = (await listWinnerResults(200))
     .map(mapWinnerRow)
     .filter((winner) => {
       const created = String(winner.createdAt || '').slice(0, 10);
@@ -198,13 +190,10 @@ export function getAdminReports({
     search,
     summary: {
       games: summary.games,
-      totalRevenue: roundMoney(summary.totalSales),
+      totalSales: roundMoney(summary.totalSales),
       totalCommission: roundMoney(summary.totalCommission),
       totalWinnerPayout: roundMoney(summary.totalWinnerPayout),
       totalCardsSold: summary.totalCardsSold,
-      dailySales: period === 'day' ? roundMoney(summary.totalSales) : roundMoney(summary.totalSales),
-      weeklySales: period === 'week' ? roundMoney(summary.totalSales) : null,
-      monthlySales: period === 'month' ? roundMoney(summary.totalSales) : null,
     },
     gameHistory: records,
     winnerHistory: winners,
