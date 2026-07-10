@@ -6,6 +6,7 @@ import BingoCardGrid from '../components/bingo/BingoCardGrid';
 import BingoControlBar from '../components/bingo/BingoControlBar';
 import EnterCartelaModal from '../components/bingo/EnterCartelaModal';
 import SelectCardWarningModal from '../components/bingo/SelectCardWarningModal';
+import CartelaNumberCallout from '../components/bingo/CartelaNumberCallout';
 import { useWinnerPrize } from '../hooks/useWinnerPrize';
 import { fetchGameSetupSettings, saveGameSetupSettings } from '../services/api';
 import { persistClosedValue, readStoredClosedValue, resolveClosedValue } from '../utils/closedRules';
@@ -27,6 +28,15 @@ export default function Bingo() {
   const [enterCardOpen, setEnterCardOpen] = useState(false);
   const [playWarningOpen, setPlayWarningOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(() => Boolean(document.fullscreenElement));
+  const [cartelaCallout, setCartelaCallout] = useState(null);
+
+  const showCartelaCallout = useCallback((cartelaNumber) => {
+    setCartelaCallout({ number: cartelaNumber, token: `${cartelaNumber}-${performance.now()}` });
+  }, []);
+
+  const clearCartelaCallout = useCallback(() => {
+    setCartelaCallout(null);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +103,12 @@ export default function Bingo() {
   useWinnerPrize({ betAmount, cardsSold, selectedCartelas, closed: gameCount, syncSales: true });
 
   const handleToggleCard = useCallback((number) => {
+    const isSelecting = !selectedCards.has(number);
+    // Fire callout first so visual feedback starts on the same click frame.
+    if (isSelecting) {
+      showCartelaCallout(number);
+    }
+
     setSelectedCards((current) => {
       const next = new Set(current);
       if (next.has(number)) {
@@ -102,7 +118,7 @@ export default function Bingo() {
       }
       return next;
     });
-  }, []);
+  }, [selectedCards, showCartelaCallout]);
 
   const handleFullscreen = useCallback(() => {
     if (!document.fullscreenElement) {
@@ -115,13 +131,15 @@ export default function Bingo() {
   const handleEnterCardConfirm = useCallback((cartelaNumber) => {
     const parsed = Number.parseInt(cartelaNumber, 10);
     if (!Number.isFinite(parsed) || parsed < 1 || parsed > TOTAL_CARDS) return;
+    if (selectedCards.has(parsed)) return;
 
+    showCartelaCallout(parsed);
     setSelectedCards((current) => {
       const next = new Set(current);
       next.add(parsed);
       return next;
     });
-  }, []);
+  }, [selectedCards, showCartelaCallout]);
 
   const handleSyncPrevious = useCallback(() => {
     setSelectedCards(new Set());
@@ -173,6 +191,13 @@ export default function Bingo() {
       <SelectCardWarningModal
         open={playWarningOpen}
         onClose={() => setPlayWarningOpen(false)}
+      />
+
+      <CartelaNumberCallout
+        key={cartelaCallout?.token ?? 'idle'}
+        number={cartelaCallout?.number ?? null}
+        token={cartelaCallout?.token ?? null}
+        onDone={clearCartelaCallout}
       />
     </div>
   );

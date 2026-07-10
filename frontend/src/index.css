@@ -226,37 +226,25 @@ body {
 
 .bingo-ball-selected {
   border: 2px solid #1a1a1a;
-  background: radial-gradient(
-    circle at 36% 28%,
-    #ffb347 0%,
-    #ff9933 36%,
-    #ff7700 70%,
-    #e86500 100%
-  );
+  background: #ff8c00;
   box-shadow:
-    0 0 6px 2px rgba(0, 191, 255, 0.4),
-    0 0 12px 4px rgba(135, 206, 250, 0.28),
-    0 2px 4px rgba(0, 0, 0, 0.22),
-    inset 0 1px 1px rgba(255, 255, 255, 0.45),
-    inset 0 -2px 4px rgba(0, 0, 0, 0.14);
+    0 0 0 1px rgba(120, 180, 230, 0.35),
+    0 0 10px 3px rgba(130, 190, 235, 0.4),
+    0 2px 4px rgba(0, 0, 0, 0.18);
 }
 
 .bingo-ball-selected:hover {
   transform: translateY(-1px);
   border: 2px solid #1a1a1a;
-  background: radial-gradient(
-    circle at 36% 28%,
-    #ffb347 0%,
-    #ff9933 36%,
-    #ff7700 70%,
-    #e86500 100%
-  );
+  background: #ff8c00;
   box-shadow:
-    0 0 8px 3px rgba(0, 191, 255, 0.45),
-    0 0 14px 5px rgba(135, 206, 250, 0.32),
-    0 3px 6px rgba(0, 0, 0, 0.24),
-    inset 0 1px 1px rgba(255, 255, 255, 0.45),
-    inset 0 -2px 4px rgba(0, 0, 0, 0.14);
+    0 0 0 1px rgba(120, 180, 230, 0.4),
+    0 0 12px 4px rgba(130, 190, 235, 0.45),
+    0 3px 6px rgba(0, 0, 0, 0.2);
+}
+
+.bingo-ball-selected .bingo-ball-number {
+  color: #0a1a3a;
 }
 
 .bingo-ball-number {
@@ -673,23 +661,23 @@ html.bingo-cartela-fullscreen .bingo-ball-triple .bingo-ball-number {
 
 html.bingo-cartela-fullscreen .bingo-ball-selected {
   border: 2px solid #0f0f0f;
-  background: linear-gradient(180deg, #ffc266 0%, #ff8c1a 55%, #f07800 100%);
+  background: #ff8c00;
   box-shadow:
-    0 0 0 2px rgba(0, 191, 255, 0.55),
-    0 0 10px 3px rgba(0, 191, 255, 0.35),
-    0 2px 4px rgba(0, 0, 0, 0.35);
+    0 0 0 1px rgba(120, 180, 230, 0.4),
+    0 0 10px 3px rgba(130, 190, 235, 0.42),
+    0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 html.bingo-cartela-fullscreen .bingo-ball-selected .bingo-ball-number {
-  color: #111111;
+  color: #0a1a3a;
 }
 
 html.bingo-cartela-fullscreen .bingo-ball-selected:hover {
-  background: linear-gradient(180deg, #ffc266 0%, #ff8c1a 55%, #f07800 100%);
+  background: #ff8c00;
   box-shadow:
-    0 0 0 2px rgba(0, 191, 255, 0.6),
-    0 0 12px 4px rgba(0, 191, 255, 0.4),
-    0 3px 6px rgba(0, 0, 0, 0.38);
+    0 0 0 1px rgba(120, 180, 230, 0.45),
+    0 0 12px 4px rgba(130, 190, 235, 0.48),
+    0 3px 6px rgba(0, 0, 0, 0.32);
 }
 
 html.bingo-cartela-fullscreen .bingo-control-bar {
@@ -1754,5 +1742,142 @@ html.bingo-cartela-fullscreen .bingo-control-bar-right {
   .check-card-modal-body {
     padding: 0 0.9rem 0.95rem;
     gap: 0.85rem;
+  }
+}
+
+/* ── Cartela number selection callout (1–150) ── */
+.cartela-number-callout {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  contain: layout style;
+  animation: cartela-callout-overlay 0.85s ease-out forwards;
+}
+
+.cartela-number-callout-flash {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    circle at center,
+    rgba(220, 230, 140, 0.28) 0%,
+    rgba(200, 215, 120, 0.12) 36%,
+    transparent 68%
+  );
+  will-change: opacity;
+  animation: cartela-callout-flash 0.85s ease-out forwards;
+}
+
+.cartela-number-callout-circle {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: clamp(10rem, 32vw, 15rem);
+  height: clamp(10rem, 32vw, 15rem);
+  border-radius: 50%;
+  background: rgba(210, 220, 120, 0.55);
+  box-shadow: none;
+  will-change: transform, opacity;
+  transform: translateZ(0);
+  animation: cartela-callout-circle-zoom 0.85s cubic-bezier(0.33, 0.8, 0.25, 1) forwards;
+}
+
+.cartela-number-callout-number {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: clamp(3.75rem, 13vw, 7.5rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: #0a1f4d;
+  text-shadow: none;
+  user-select: none;
+  will-change: transform, opacity;
+  transform: translateZ(0);
+  animation: cartela-callout-number-zoom 0.85s cubic-bezier(0.28, 0.85, 0.25, 1) forwards;
+}
+
+@keyframes cartela-callout-overlay {
+  0%,
+  68% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes cartela-callout-flash {
+  0% {
+    opacity: 1;
+  }
+  12% {
+    opacity: 0.35;
+  }
+  22% {
+    opacity: 0.9;
+  }
+  38% {
+    opacity: 0.2;
+  }
+  55%,
+  68% {
+    opacity: 0.12;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Circle: grow from inside to full size, then shrink back. */
+@keyframes cartela-callout-circle-zoom {
+  0% {
+    transform: scale(0.2);
+    opacity: 0.65;
+  }
+  38% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  62% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.22);
+    opacity: 0;
+  }
+}
+
+/* Number: zoom forward toward the viewer, then return and fade. */
+@keyframes cartela-callout-number-zoom {
+  0% {
+    transform: scale(0.28);
+    opacity: 0.55;
+  }
+  38% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+  62% {
+    transform: scale(1.22);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.35);
+    opacity: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .cartela-number-callout-circle {
+    width: clamp(8.5rem, 46vw, 12.5rem);
+    height: clamp(8.5rem, 46vw, 12.5rem);
+  }
+
+  .cartela-number-callout-number {
+    font-size: clamp(3rem, 18vw, 5.5rem);
   }
 }
