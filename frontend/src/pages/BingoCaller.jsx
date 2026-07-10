@@ -190,15 +190,29 @@ export default function BingoCaller() {
     setIsPaused(true);
   }, [clearIntervalTimer, isRunning, isPaused]);
 
-  const handleStart = async () => {
+  const handleStart = () => {
     if (isRunning && !isPaused) return;
+
+    // Resume after Pause or Check Cartela: call the next number immediately,
+    // then continue on the normal interval (no initial wait).
     if (isPaused) {
-      await refreshCallInterval();
+      clearIntervalTimer();
       setIsPaused(false);
-      intervalRef.current = window.setInterval(drawNext, callIntervalMsRef.current);
+      drawNext();
+
+      const intervalMs = callIntervalMsRef.current;
+      intervalRef.current = window.setInterval(drawNext, intervalMs);
+
+      void refreshCallInterval().then((nextIntervalMs) => {
+        if (!isRunningRef.current || isPausedRef.current) return;
+        if (nextIntervalMs === intervalMs) return;
+        clearIntervalTimer();
+        intervalRef.current = window.setInterval(drawNext, nextIntervalMs);
+      });
       return;
     }
-    startCalling();
+
+    void startCalling();
   };
 
   const handlePause = () => {
