@@ -281,22 +281,34 @@ export function describeCartelaLookup(cardId) {
       existsInWorkbook: false,
       source: null,
       cartela: null,
+      timingsMs: { memoryMs: 0, workbookMs: 0 },
     };
   }
 
+  const memoryStart = process.hrtime.bigint();
   const fromDb = getCartelaById(parsedId);
+  const memoryMs = Number(process.hrtime.bigint() - memoryStart) / 1e6;
+
   if (fromDb) {
+    // Do not touch the XLSX workbook on the hot path when memory already has the card.
     return {
       cardId: parsedId,
       inRange: true,
       existsInDb: true,
-      existsInWorkbook: Boolean(getCartelaFromWorkbook(parsedId)),
-      source: 'database',
+      existsInWorkbook: null,
+      source: 'memory',
       cartela: fromDb,
+      timingsMs: {
+        memoryMs: Number(memoryMs.toFixed(3)),
+        workbookMs: 0,
+      },
     };
   }
 
+  const workbookStart = process.hrtime.bigint();
   const fromWorkbook = getCartelaForCheckCard(parsedId);
+  const workbookMs = Number(process.hrtime.bigint() - workbookStart) / 1e6;
+
   return {
     cardId: parsedId,
     inRange: true,
@@ -304,6 +316,10 @@ export function describeCartelaLookup(cardId) {
     existsInWorkbook: Boolean(fromWorkbook),
     source: fromWorkbook ? 'workbook' : null,
     cartela: fromWorkbook,
+    timingsMs: {
+      memoryMs: Number(memoryMs.toFixed(3)),
+      workbookMs: Number(workbookMs.toFixed(3)),
+    },
   };
 }
 

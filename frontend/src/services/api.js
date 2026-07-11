@@ -55,14 +55,33 @@ export async function apiFetch(path, options = {}) {
 
 export async function fetchCartela(cartelaNo) {
   const trimmed = String(cartelaNo ?? '').trim();
+  const started = performance.now();
   const response = await apiFetch(`/api/cartela/${encodeURIComponent(trimmed)}`);
+  const headersMs = performance.now() - started;
+  const serverTiming = response.headers.get('server-timing');
 
   if (response.status === 404 || response.status === 500) {
+    console.log('[check-cartela-profile]', JSON.stringify({
+      step: 'fetchCartela',
+      cartelaNo: trimmed,
+      ok: false,
+      status: response.status,
+      networkMs: Number(headersMs.toFixed(2)),
+      serverTiming,
+    }));
     return { ok: false, status: response.status, error: 'not-found' };
   }
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
+    console.log('[check-cartela-profile]', JSON.stringify({
+      step: 'fetchCartela',
+      cartelaNo: trimmed,
+      ok: false,
+      status: response.status,
+      networkMs: Number((performance.now() - started).toFixed(2)),
+      serverTiming,
+    }));
     return {
       ok: false,
       status: response.status,
@@ -71,6 +90,13 @@ export async function fetchCartela(cartelaNo) {
   }
 
   const data = await response.json();
+  console.log('[check-cartela-profile]', JSON.stringify({
+    step: 'fetchCartela',
+    cartelaNo: trimmed,
+    ok: true,
+    networkMs: Number((performance.now() - started).toFixed(2)),
+    serverTiming,
+  }));
   return { ok: true, data };
 }
 

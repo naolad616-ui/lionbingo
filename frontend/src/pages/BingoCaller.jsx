@@ -12,6 +12,7 @@ import {
   preloadGameSounds,
   stopGameSounds,
 } from '../utils/gameSound';
+import { preloadCartelas } from '../utils/cartelaCache';
 import getSocket from '../services/socket';
 import {
   fetchSoundSettings,
@@ -300,8 +301,10 @@ export default function BingoCaller() {
   }, [isRunning]);
 
   useEffect(() => {
-    // Warm audio cache in the background so ball calls play from memory, not network.
+    // Warm audio + cartela caches once on mount so checks/calls stay local.
     void preloadGameSounds();
+    void preloadCartelas(selectedCartelas);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- warm once when caller opens
   }, []);
 
   useEffect(() => {

@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 import CheckCardPreview from './CheckCardPreview';
 import CheckCardWinnerConfetti from './CheckCardWinnerConfetti';
 import {
-  fetchCartela,
   fetchGameState,
   fetchPatternSettings,
   checkCartelaInGame,
@@ -34,30 +33,13 @@ import {
   unlockCartela,
   writeCartelaCheckState,
 } from '../../utils/checkCardSession';
+import { getCachedCartela } from '../../utils/cartelaCache';
 import { recordCheckCardWinner } from '../../utils/gameSalesTracking';
 import {
   playCheckCardResultSounds,
   primeCheckCardSoundPlayback,
   resetCheckCardSoundState,
 } from '../../utils/gameSound';
-
-/** In-memory cartela payloads so repeat checks skip the network. */
-const cartelaResponseCache = new Map();
-
-async function getCachedCartela(cartelaNo) {
-  const key = String(cartelaNo ?? '').trim();
-  const cached = cartelaResponseCache.get(key);
-  if (cached) {
-    return { ok: true, data: cached, fromCache: true };
-  }
-
-  const result = await fetchCartela(key);
-  if (result.ok && result.data) {
-    cartelaResponseCache.set(key, result.data);
-  }
-
-  return result;
-}
 
 function runCheckCardValidation({
   numbers,
@@ -349,6 +331,12 @@ export default function CheckCardModal({
     setIsLoading(true);
     setStatusMessage('');
 
+    const profileStarted = performance.now();
+    const mark = (name, startedAt = profileStarted) => ({
+      name,
+      ms: Number((performance.now() - startedAt).toFixed(2)),
+    });
+
     // Prefer live caller/session data already in memory.
     const knownSelectedCartelas = Array.isArray(selectedCartelasProp)
       ? selectedCartelasProp
@@ -360,7 +348,13 @@ export default function CheckCardModal({
     const needsPatterns = !activePatterns || typeof activePatterns !== 'object';
 
     // Fetch cartela (cached) in parallel with patterns/game state only when missing.
-    const cartelaPromise = getCachedCartela(trimmedCartelaNo);
+    const cartelaFetchStarted = performance.now();
+    const cartelaPromise = getCachedCartela(trimmedCartelaNo).then((result) => ({
+      result,
+      fetchMs: performance.now() - cartelaFetchStarted,
+      fromCache: Boolean(result.fromCache),
+    }));
+    const supportStarted = performance.now();
     const supportPromise = needsPatterns
       ? (async () => {
         const [gameStateResult, patternsResult] = await Promise.all([
@@ -380,11 +374,13 @@ export default function CheckCardModal({
           data,
           patterns,
           backendCalls: Array.isArray(data?.calledNumbers) ? data.calledNumbers : null,
+          supportMs: performance.now() - supportStarted,
         };
       })()
       : Promise.resolve(null);
 
-    const [cartelaResult, support] = await Promise.all([cartelaPromise, supportPromise]);
+    const [cartelaPacket, support] = await Promise.all([cartelaPromise, supportPromise]);
+    const cartelaResult = cartelaPacket.result;
 
     if (support) {
       gameData = support.data;
@@ -409,6 +405,7 @@ export default function CheckCardModal({
     const purchased = isCartelaPurchased(trimmedCartelaNo, knownSelectedCartelas);
     let nextCheckResult = null;
 
+    const validationStarted = performance.now();
     if (purchased && activePatterns) {
       nextCheckResult = runCheckCardValidation({
         numbers: cartelaResult.data.numbers,
@@ -419,6 +416,7 @@ export default function CheckCardModal({
         progressionActive: winProgressionActive,
       });
     }
+    const validationMs = performance.now() - validationStarted;
 
     // Show validated result immediately — do not wait on sounds or backend echo.
     setIsLoading(false);
@@ -426,6 +424,16 @@ export default function CheckCardModal({
     setCardLoaded(true);
     setIsLocked(isCartelaLocked(trimmedCartelaNo));
 
+    console.log('[check-cartela-profile]', JSON.stringify({
+      step: 'evaluateCard',
+      cartelaNo: trimmedCartelaNo,
+      needsPatterns,
+      cartelaFromCache: cartelaPacket.fromCache,
+      cartelaFetchMs: Number(cartelaPacket.fetchMs.toFixed(2)),
+      supportMs: support ? Number(support.supportMs.toFixed(2)) : 0,
+      validationMs: Number(validationMs.toFixed(2)),
+      totalUntilResultMs: mark('totalUntilResult').ms,
+    }));
     const mergedCalls = mergeCalledNumbers(callerCalledNumbers, backendCalls);
     const callCount = mergedCalls.length;
     const priorProgress = getPriorProgress(trimmedCartelaNo);

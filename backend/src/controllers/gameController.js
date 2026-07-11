@@ -2,6 +2,7 @@ import { DEFAULT_ROOM_ID } from '../constants/defaults.js';
 import { roomManager } from '../services/gameEngine.js';
 import { validateCartelaForRoom } from '../services/validationService.js';
 import { finalizeValidatedWinner } from '../services/winnerResultService.js';
+import { createRequestTimer, measureSync } from '../utils/requestTimer.js';
 
 function getRoomId(value) {
   return value || DEFAULT_ROOM_ID;
@@ -31,9 +32,26 @@ function emitGameState(io, roomId) {
 }
 
 export function getGameState(req, res) {
+  const timer = createRequestTimer('GET /api/game/state');
   const roomId = getRoomId(req.query.roomId);
-  const room = roomManager.getRoom(roomId);
-  res.json(room.getPublicState());
+  const roomMeasured = measureSync(() => roomManager.getRoom(roomId));
+  const stateMeasured = measureSync(() => roomMeasured.value.getPublicState());
+  const profile = timer.log({
+    roomId,
+    mongoQueryMs: 0,
+    roomResolveMs: Number(roomMeasured.ms.toFixed(2)),
+    serializationMs: Number(stateMeasured.ms.toFixed(2)),
+  });
+  res.setHeader(
+    'Server-Timing',
+    [
+      `room;dur=${profile.roomResolveMs};desc="Room resolve"`,
+      `serialize;dur=${profile.serializationMs};desc="Serialization"`,
+      `total;dur=${profile.totalMs};desc="Total handler"`,
+    ].join(', '),
+  );
+  res.setHeader('Access-Control-Expose-Headers', 'Server-Timing');
+  res.json(stateMeasured.value);
 }
 
 export function configureGameSales(req, res) {
@@ -183,21 +201,36 @@ export function resetGame(req, res) {
 }
 
 export function checkCartela(req, res) {
+  const timer = createRequestTimer('POST /api/game/check');
   const roomId = getRoomId(req.body?.roomId);
   const cartelaNumber = req.body?.cartelaNumber ?? req.body?.cartelaNo;
 
   if (cartelaNumber === undefined || cartelaNumber === null || cartelaNumber === '') {
+    timer.log({ ok: false, error: 'cartelaNumber required' });
     res.status(400).json({ error: 'cartelaNumber is required' });
     return;
   }
 
-  const result = validateCartelaForRoom({
+  const validationMeasured = measureSync(() => validateCartelaForRoom({
     cartelaNumber,
     roomId,
     action: 'check',
+  }));
+  const profile = timer.log({
+    cartelaNumber,
+    mongoQueryMs: 0,
+    validationMs: Number(validationMeasured.ms.toFixed(2)),
+    ok: true,
   });
-
-  res.json(result);
+  res.setHeader(
+    'Server-Timing',
+    [
+      `validate;dur=${profile.validationMs};desc="Validation"`,
+      `total;dur=${profile.totalMs};desc="Total handler"`,
+    ].join(', '),
+  );
+  res.setHeader('Access-Control-Expose-Headers', 'Server-Timing');
+  res.json(validationMeasured.value);
 }
 
 export async function claimBingo(req, res) {
