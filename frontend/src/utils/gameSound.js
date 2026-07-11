@@ -6,15 +6,8 @@ import {
 
 const SOUNDS_BASE_PATH = '/sounds';
 const HAVE_CURRENT_DATA = 2;
-const HAVE_FUTURE_DATA = 3;
-
-/** Reusable HTMLAudioElement instances keyed by file name (no per-call download). */
-const audioCache = new Map();
-
-let activeAudio = null;
-let activePlaybackToken = 0;
-let lastCheckCardWinSoundKey = null;
-let preloadPromise = null;
+const LOAD_TIMEOUT_MS = 8000;
+const PLAY_RETRY_DELAY_MS = 40;
 
 function soundPath(fileName) {
   return `${SOUNDS_BASE_PATH}/${fileName}`;
@@ -25,7 +18,6 @@ function resolveBallNumber(number) {
   if (!Number.isFinite(ballNumber) || ballNumber < 1 || ballNumber > 75) {
     return null;
   }
-
   return ballNumber;
 }
 
@@ -52,316 +44,518 @@ export function getBallSoundFileName(number) {
 
 function listGameSoundFiles() {
   const files = [];
-
   for (let ballNumber = 1; ballNumber <= 75; ballNumber += 1) {
     const fileName = getBallSoundFileName(ballNumber);
     if (fileName) {
       files.push(fileName);
     }
   }
-
   files.push('win.mp3', 'not-win.mp3', 'pause.mp3', 'shuffle.mp3');
   return files;
 }
 
-function getCachedAudio(fileName) {
-  let audio = audioCache.get(fileName);
-  if (audio) {
-    return audio;
-  }
-
-  audio = new Audio();
-  audio.preload = 'auto';
-  audio.src = soundPath(fileName);
-  audioCache.set(fileName, audio);
-  return audio;
-}
-
-function waitForAudioReady(audio) {
-  if (audio.readyState >= HAVE_FUTURE_DATA) {
-    return Promise.resolve(true);
-  }
-
-  return new Promise((resolve) => {
-    let settled = false;
-
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      audio.removeEventListener('canplaythrough', onReady);
-      audio.removeEventListener('loadeddata', onReady);
-      audio.removeEventListener('error', onError);
-      resolve(ok);
-    };
-
-    const onReady = () => finish(true);
-    const onError = () => finish(false);
-
-    audio.addEventListener('canplaythrough', onReady);
-    audio.addEventListener('loadeddata', onReady);
-    audio.addEventListener('error', onError);
-
-    // Kick off network fetch/decode without blocking the caller.
-    try {
-      audio.load();
-    } catch {
-      finish(false);
-    }
-  });
+function isAbortError(error) {
+  if (!error) return false;
+  if (error.name === 'AbortError') return true;
+  const message = String(error.message || error);
+  return /interrupted|aborted|abort/i.test(message);
 }
 
 /**
- * Preload ball + UI sounds into a reusable Audio cache.
- * Safe to call multiple times; yields between batches to avoid UI freezes.
+ * Web-Audio-first engine:
+ * - Prefetch + decode once into AudioBuffers
+ * - Each play() creates a fresh BufferSource (no shared-element races)
+ * - Falls back to HTMLAudioElement clones when Web Audio is unavailable
  */
-export function preloadGameSounds() {
-  if (preloadPromise) {
-    return preloadPromise;
+class GameAudioEngine {
+  constructor() {
+    this.audioContext = null;
+    this.buffers = new Map();
+    this.htmlTemplates = new Map();
+    this.arrayBuffers = new Map();
+    this.preloadPromise = null;
+    this.unlocked = false;
+    this.activePlaybackToken = 0;
+    this.activeSource = null;
+    this.activeHtmlAudio = null;
+    this.activeEndedHandler = null;
+    this.activeResolve = null;
+    this.unlockListenersBound = false;
   }
 
-  const files = listGameSoundFiles();
-
-  preloadPromise = (async () => {
-    const batchSize = 6;
-
-    for (let index = 0; index < files.length; index += batchSize) {
-      const batch = files.slice(index, index + batchSize);
-      await Promise.all(
-        batch.map(async (fileName) => {
-          const audio = getCachedAudio(fileName);
-          await waitForAudioReady(audio);
-        }),
-      );
-
-      // Yield so number-call UI / React work can run between batches.
-      await new Promise((resolve) => {
-        window.setTimeout(resolve, 0);
-      });
+  ensureContext() {
+    if (this.audioContext) {
+      return this.audioContext;
     }
 
-    console.log('[game-sound] preload complete', { count: audioCache.size });
-    return true;
-  })().catch((error) => {
-    console.warn('[game-sound] preload failed', error);
-    preloadPromise = null;
-    return false;
-  });
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) {
+      return null;
+    }
 
-  return preloadPromise;
-}
-
-function stopActiveSound() {
-  if (!activeAudio) return;
-
-  try {
-    activeAudio.pause();
-    activeAudio.currentTime = 0;
-  } catch {
-    // ignore seek/pause errors on partially loaded media
+    this.audioContext = new AudioContextCtor();
+    return this.audioContext;
   }
 
-  activeAudio = null;
-}
+  bindUnlockListeners() {
+    if (this.unlockListenersBound || typeof document === 'undefined') {
+      return;
+    }
 
-function logSoundFailure(fileName, audio, playError) {
-  const path = soundPath(fileName);
-  const mediaError = audio?.error;
+    this.unlockListenersBound = true;
+    const unlock = () => {
+      void this.unlock();
+    };
 
-  console.error('[game-sound] failed to load/play sound', {
-    fileName,
-    path,
-    mediaErrorCode: mediaError?.code ?? null,
-    mediaErrorMessage: mediaError?.message ?? null,
-    playError: playError instanceof Error ? playError.message : playError ?? null,
-  });
-}
+    document.addEventListener('pointerdown', unlock, { passive: true });
+    document.addEventListener('touchstart', unlock, { passive: true });
+    document.addEventListener('keydown', unlock);
+  }
 
-function logCheckCardSoundFailure(fileName, audio, playError) {
-  const path = soundPath(fileName);
-  const mediaError = audio?.error;
+  async unlock() {
+    this.bindUnlockListeners();
+    const context = this.ensureContext();
 
-  console.error('[check-card-sound] playback failed', {
-    fileName,
-    path,
-    mediaErrorCode: mediaError?.code ?? null,
-    mediaErrorMessage: mediaError?.message ?? null,
-    playError: playError instanceof Error ? playError.message : playError ?? null,
-  });
-}
+    try {
+      if (context && context.state === 'suspended') {
+        await context.resume();
+      }
 
-function probeSoundFile(fileName) {
-  const path = soundPath(fileName);
+      // Tiny silent buffer forces mobile / Telegram WebView to fully unlock.
+      if (context && !this.unlocked) {
+        const silence = context.createBuffer(1, 1, context.sampleRate || 22050);
+        const source = context.createBufferSource();
+        source.buffer = silence;
+        source.connect(context.destination);
+        source.start(0);
+      }
 
-  return fetch(path, { method: 'HEAD' })
-    .then((response) => {
-      console.log('[check-card-sound] file probe', {
-        path,
-        status: response.status,
-        ok: response.ok,
-      });
-      return response.ok;
-    })
-    .catch((error) => {
-      console.error('[check-card-sound] file probe error', { path, error });
+      this.unlocked = true;
+      return true;
+    } catch (error) {
+      console.warn('[game-sound] unlock failed', error);
       return false;
-    });
-}
-
-function playSoundFile(fileName, { logLabel, logCategory } = {}) {
-  const path = soundPath(fileName);
-  const token = activePlaybackToken + 1;
-  activePlaybackToken = token;
-  stopActiveSound();
-
-  const logPrefix = logCategory === 'check-card' ? '[check-card-sound]' : '[game-sound]';
-
-  if (logLabel) {
-    console.log(`${logPrefix} playing sound: ${logLabel}, file=${fileName}`);
+    }
   }
 
-  // Ensure background preload continues while calls happen.
-  void preloadGameSounds();
+  async fetchArrayBuffer(fileName) {
+    if (this.arrayBuffers.has(fileName)) {
+      return this.arrayBuffers.get(fileName);
+    }
 
-  return new Promise((resolve) => {
-    const audio = getCachedAudio(fileName);
+    const response = await fetch(soundPath(fileName), { cache: 'default' });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch ${fileName}: ${response.status}`);
+    }
 
-    const cleanup = () => {
-      audio.removeEventListener('ended', onEnded);
-      audio.removeEventListener('error', onError);
-    };
+    const buffer = await response.arrayBuffer();
+    this.arrayBuffers.set(fileName, buffer);
+    return buffer;
+  }
 
-    const onEnded = () => {
-      cleanup();
-      if (token !== activePlaybackToken) {
-        return;
-      }
+  async decodeFile(fileName) {
+    if (this.buffers.has(fileName)) {
+      return this.buffers.get(fileName);
+    }
 
-      if (activeAudio === audio) {
-        activeAudio = null;
-      }
+    const context = this.ensureContext();
+    if (!context) {
+      return null;
+    }
 
-      resolve(true);
-    };
+    const arrayBuffer = await this.fetchArrayBuffer(fileName);
+    // copy() — decodeAudioData may detach the buffer.
+    const copy = arrayBuffer.slice(0);
+    const decoded = await context.decodeAudioData(copy);
+    this.buffers.set(fileName, decoded);
+    return decoded;
+  }
 
-    const onError = () => {
-      cleanup();
-      if (token !== activePlaybackToken) {
-        return;
-      }
+  ensureHtmlTemplate(fileName) {
+    let audio = this.htmlTemplates.get(fileName);
+    if (audio) {
+      return audio;
+    }
 
-      if (logCategory === 'check-card') {
-        logCheckCardSoundFailure(fileName, audio);
-      } else {
-        logSoundFailure(fileName, audio);
-      }
+    audio = new Audio();
+    audio.preload = 'auto';
+    audio.src = soundPath(fileName);
+    this.htmlTemplates.set(fileName, audio);
+    return audio;
+  }
 
-      if (activeAudio === audio) {
-        activeAudio = null;
-      }
+  waitForHtmlReady(audio) {
+    if (audio.readyState >= HAVE_CURRENT_DATA) {
+      return Promise.resolve(true);
+    }
 
-      resolve(false);
-    };
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        audio.removeEventListener('canplaythrough', onReady);
+        audio.removeEventListener('loadeddata', onReady);
+        audio.removeEventListener('error', onError);
+        resolve(ok);
+      };
 
-    const startPlayback = () => {
-      if (token !== activePlaybackToken) {
-        return;
-      }
+      const onReady = () => finish(true);
+      const onError = () => finish(false);
+      const timeoutId = window.setTimeout(() => finish(audio.readyState >= HAVE_CURRENT_DATA), LOAD_TIMEOUT_MS);
+
+      audio.addEventListener('canplaythrough', onReady);
+      audio.addEventListener('loadeddata', onReady);
+      audio.addEventListener('error', onError);
 
       try {
+        audio.load();
+      } catch {
+        finish(false);
+      }
+    });
+  }
+
+  async preload() {
+    if (this.preloadPromise) {
+      return this.preloadPromise;
+    }
+
+    this.bindUnlockListeners();
+    const files = listGameSoundFiles();
+
+    this.preloadPromise = (async () => {
+      this.ensureContext();
+      const batchSize = 5;
+
+      for (let index = 0; index < files.length; index += batchSize) {
+        const batch = files.slice(index, index + batchSize);
+        await Promise.all(
+          batch.map(async (fileName) => {
+            try {
+              await this.decodeFile(fileName);
+            } catch (error) {
+              console.warn('[game-sound] decode failed, keeping HTML fallback', {
+                fileName,
+                error: error instanceof Error ? error.message : error,
+              });
+              try {
+                await this.fetchArrayBuffer(fileName);
+              } catch (fetchError) {
+                console.error('[game-sound] fetch failed during preload', {
+                  fileName,
+                  error: fetchError instanceof Error ? fetchError.message : fetchError,
+                });
+              }
+              const template = this.ensureHtmlTemplate(fileName);
+              await this.waitForHtmlReady(template);
+            }
+          }),
+        );
+
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, 0);
+        });
+      }
+
+      console.log('[game-sound] preload complete', {
+        buffers: this.buffers.size,
+        htmlTemplates: this.htmlTemplates.size,
+      });
+      return true;
+    })().catch((error) => {
+      console.warn('[game-sound] preload failed', error);
+      this.preloadPromise = null;
+      return false;
+    });
+
+    return this.preloadPromise;
+  }
+
+  stopActive() {
+    if (this.activeResolve) {
+      const resolve = this.activeResolve;
+      this.activeResolve = null;
+      resolve(false);
+    }
+
+    if (this.activeSource) {
+      try {
+        this.activeSource.onended = null;
+        this.activeSource.stop(0);
+      } catch {
+        // already stopped
+      }
+      try {
+        this.activeSource.disconnect();
+      } catch {
+        // ignore
+      }
+      this.activeSource = null;
+    }
+
+    if (this.activeHtmlAudio) {
+      const audio = this.activeHtmlAudio;
+      if (this.activeEndedHandler) {
+        audio.removeEventListener('ended', this.activeEndedHandler);
+        audio.removeEventListener('error', this.activeEndedHandler);
+      }
+      try {
+        audio.pause();
         audio.currentTime = 0;
       } catch {
         // ignore
       }
+      this.activeHtmlAudio = null;
+      this.activeEndedHandler = null;
+    }
+  }
 
-      activeAudio = audio;
-      audio.addEventListener('ended', onEnded);
-      audio.addEventListener('error', onError);
+  stopAll() {
+    this.activePlaybackToken += 1;
+    this.stopActive();
+  }
 
-      const playAttempt = audio.play();
-      if (!playAttempt || typeof playAttempt.then !== 'function') {
-        return;
-      }
-
-      playAttempt
-        .then(() => {
-          if (token !== activePlaybackToken) {
-            return;
-          }
-          console.log(`${logPrefix} playback started`, { fileName, path, cached: true });
-        })
-        .catch((playError) => {
-          if (token !== activePlaybackToken) {
-            return;
-          }
-
-          cleanup();
-
-          if (logCategory === 'check-card') {
-            logCheckCardSoundFailure(fileName, audio, playError);
-          } else {
-            logSoundFailure(fileName, audio, playError);
-          }
-
-          if (activeAudio === audio) {
-            activeAudio = null;
-          }
-
-          resolve(false);
-        });
-    };
-
-    // Play immediately when already buffered; otherwise wait without creating a new Audio.
-    if (audio.readyState >= HAVE_CURRENT_DATA) {
-      startPlayback();
-      return;
+  playWithWebAudio(fileName, token) {
+    const context = this.ensureContext();
+    const buffer = this.buffers.get(fileName);
+    if (!context || !buffer) {
+      return null;
     }
 
-    const onReady = () => {
-      audio.removeEventListener('canplaythrough', onReady);
-      audio.removeEventListener('loadeddata', onReady);
-      startPlayback();
-    };
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        if (this.activeResolve === finishResolve) {
+          this.activeResolve = null;
+        }
+        if (this.activeSource === source) {
+          this.activeSource = null;
+        }
+        resolve(ok);
+      };
+      const finishResolve = finish;
 
-    audio.addEventListener('canplaythrough', onReady);
-    audio.addEventListener('loadeddata', onReady);
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      this.activeSource = source;
+      this.activeResolve = finishResolve;
 
-    if (audio.readyState === 0) {
+      source.onended = () => {
+        if (token !== this.activePlaybackToken) {
+          finish(false);
+          return;
+        }
+        finish(true);
+      };
+
       try {
-        audio.load();
-      } catch {
-        onReady();
+        source.start(0);
+      } catch (error) {
+        console.error('[game-sound] BufferSource.start failed', {
+          fileName,
+          error: error instanceof Error ? error.message : error,
+        });
+        finish(false);
+      }
+    });
+  }
+
+  playWithHtmlAudio(fileName, token) {
+    const template = this.ensureHtmlTemplate(fileName);
+
+    return this.waitForHtmlReady(template).then((ready) => {
+      if (!ready || token !== this.activePlaybackToken) {
+        return false;
+      }
+
+      // Clone so rapid plays never share one element's play/pause timeline.
+      const audio = template.cloneNode(true);
+      audio.preload = 'auto';
+
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (ok) => {
+          if (settled) return;
+          settled = true;
+          audio.removeEventListener('ended', onEnded);
+          audio.removeEventListener('error', onError);
+          if (this.activeResolve === finish) {
+            this.activeResolve = null;
+          }
+          if (this.activeHtmlAudio === audio) {
+            this.activeHtmlAudio = null;
+            this.activeEndedHandler = null;
+          }
+          resolve(ok);
+        };
+
+        const onEnded = () => {
+          if (token !== this.activePlaybackToken) {
+            finish(false);
+            return;
+          }
+          finish(true);
+        };
+
+        const onError = () => {
+          if (token !== this.activePlaybackToken) {
+            finish(false);
+            return;
+          }
+          console.error('[game-sound] HTML audio element error', {
+            fileName,
+            mediaErrorCode: audio.error?.code ?? null,
+            mediaErrorMessage: audio.error?.message ?? null,
+          });
+          finish(false);
+        };
+
+        this.activeHtmlAudio = audio;
+        this.activeEndedHandler = onEnded;
+        this.activeResolve = finish;
+        audio.addEventListener('ended', onEnded);
+        audio.addEventListener('error', onError);
+
+        const attemptPlay = (isRetry = false) => {
+          if (token !== this.activePlaybackToken) {
+            finish(false);
+            return;
+          }
+
+          try {
+            audio.currentTime = 0;
+          } catch {
+            // ignore seek issues before metadata
+          }
+
+          const playAttempt = audio.play();
+          if (!playAttempt || typeof playAttempt.then !== 'function') {
+            finish(true);
+            return;
+          }
+
+          playAttempt
+            .then(() => {
+              // keep waiting for ended
+            })
+            .catch(async (playError) => {
+              if (token !== this.activePlaybackToken) {
+                finish(false);
+                return;
+              }
+
+              if (isAbortError(playError)) {
+                // Superseded by a newer play request — not a hard failure.
+                finish(false);
+                return;
+              }
+
+              if (!isRetry) {
+                await this.unlock();
+                window.setTimeout(() => attemptPlay(true), PLAY_RETRY_DELAY_MS);
+                return;
+              }
+
+              console.error('[game-sound] HTML audio play() failed', {
+                fileName,
+                error: playError instanceof Error ? playError.message : playError,
+              });
+              finish(false);
+            });
+        };
+
+        attemptPlay(false);
+      });
+    });
+  }
+
+  async play(fileName, { logLabel, logCategory } = {}) {
+    const logPrefix = logCategory === 'check-card' ? '[check-card-sound]' : '[game-sound]';
+    const token = this.activePlaybackToken + 1;
+    this.activePlaybackToken = token;
+    this.stopActive();
+
+    if (logLabel) {
+      console.log(`${logPrefix} playing sound: ${logLabel}, file=${fileName}`);
+    }
+
+    void this.preload();
+    await this.unlock();
+
+    if (token !== this.activePlaybackToken) {
+      return false;
+    }
+
+    // Prefer Web Audio when buffer is ready; decode on demand otherwise.
+    if (!this.buffers.has(fileName)) {
+      try {
+        await this.decodeFile(fileName);
+      } catch (error) {
+        console.warn('[game-sound] on-demand decode failed, using HTML fallback', {
+          fileName,
+          error: error instanceof Error ? error.message : error,
+        });
       }
     }
-  });
+
+    if (token !== this.activePlaybackToken) {
+      return false;
+    }
+
+    if (this.buffers.has(fileName) && this.ensureContext()) {
+      try {
+        if (this.audioContext.state === 'suspended') {
+          await this.audioContext.resume();
+        }
+      } catch {
+        // fall through to HTML
+      }
+
+      if (token !== this.activePlaybackToken) {
+        return false;
+      }
+
+      const webResult = this.playWithWebAudio(fileName, token);
+      if (webResult) {
+        const ok = await webResult;
+        if (ok) {
+          console.log(`${logPrefix} playback finished`, { fileName, engine: 'webaudio' });
+        }
+        return ok;
+      }
+    }
+
+    const htmlOk = await this.playWithHtmlAudio(fileName, token);
+    if (htmlOk) {
+      console.log(`${logPrefix} playback finished`, { fileName, engine: 'html' });
+    }
+    return htmlOk;
+  }
+}
+
+const engine = new GameAudioEngine();
+engine.bindUnlockListeners();
+
+let lastCheckCardWinSoundKey = null;
+
+export function preloadGameSounds() {
+  return engine.preload();
+}
+
+function playSoundFile(fileName, options = {}) {
+  return engine.play(fileName, options);
 }
 
 export function primeCheckCardSoundPlayback() {
-  const path = soundPath('not-win.mp3');
-  console.log('[check-card-sound] CHECK button pressed.');
-  console.log('[check-card-sound] Priming browser audio for check playback at:', path);
-
-  void probeSoundFile('not-win.mp3');
-  void preloadGameSounds();
-
-  const audio = getCachedAudio('not-win.mp3');
-
-  const playAttempt = audio.play();
-  if (!playAttempt || typeof playAttempt.then !== 'function') {
-    return;
-  }
-
-  playAttempt
-    .then(() => {
-      audio.pause();
-      audio.currentTime = 0;
-      console.log('[check-card-sound] Browser audio primed successfully for:', path);
-    })
-    .catch((error) => {
-      console.warn('[check-card-sound] Browser audio prime failed (will retry after validation):', {
-        path,
-        error: error instanceof Error ? error.message : error,
-      });
-    });
+  // Unlock audio graph only — do not play/pause not-win.mp3 (that raced real playback).
+  console.log('[check-card-sound] CHECK button pressed — unlocking audio');
+  void engine.unlock();
+  void engine.preload();
 }
 
 export function playBallSound(number) {
@@ -388,10 +582,7 @@ export function playCheckCardWinSound() {
 }
 
 export function playNotWinSound() {
-  const path = soundPath('not-win.mp3');
   console.log('[check-card-sound] Validation result: Not Winner');
-  console.log('[check-card-sound] Playing not-win sound at:', path);
-
   return playSoundFile('not-win.mp3', {
     logLabel: 'not-win',
     logCategory: 'check-card',
@@ -476,7 +667,6 @@ export async function playCheckCardResultSounds({
 }
 
 export function stopGameSounds() {
-  activePlaybackToken += 1;
-  stopActiveSound();
+  engine.stopAll();
   resetCheckCardSoundState();
 }
