@@ -1,6 +1,7 @@
 import getSocket from '../services/socket';
 import {
   buildHistoryRecordFromSession,
+  isSessionPersisted,
   persistGameSalesRecord,
 } from './gameSalesHistory';
 import { getDefaultCommissionTiers } from './salesCalculations';
@@ -138,16 +139,32 @@ function createSession({ status, sales }) {
 
 async function persistCompletedSession(session, options = {}) {
   if (!session || !['completed', 'reset'].includes(session.status)) {
-    return;
+    return { ok: false, error: 'Session not complete' };
+  }
+
+  if (isSessionPersisted(session.id)) {
+    return { ok: true, skipped: true };
   }
 
   const record = buildHistoryRecordFromSession(session, options, getDefaultCommissionTiers());
-  if (!record) return;
+  if (!record) {
+    return { ok: false, error: 'Invalid history record' };
+  }
 
-  const result = await persistGameSalesRecord(record);
+  let result = await persistGameSalesRecord(record);
+  if (!result.ok) {
+    console.warn('[sales-history] persist failed, retrying once', {
+      sessionId: session.id,
+      error: result.error,
+    });
+    result = await persistGameSalesRecord(record);
+  }
+
   if (!result.ok) {
     console.warn('[sales-history] persist failed', { sessionId: session.id, error: result.error });
   }
+
+  return result;
 }
 
 export function trackCartelaPurchase(sales, prize = null) {
@@ -222,34 +239,74 @@ export function trackGameStart(sales, prize = null) {
   });
 }
 
-export function trackGameEnd(reason = 'reset', context = {}) {
-  const sessions = loadSessions();
-  const activeSession = [...sessions].reverse().find((session) => session.status === 'active');
+function sessionHasSales(session) {
+  if (!session) return false;
+  if (Number(session.cardsSold) >= 1) return true;
+  return Array.isArray(session.selectedCartelas) && session.selectedCartelas.length >= 1;
+}
 
-  if (!activeSession) {
+function findSessionToFinalize(sessions) {
+  const reversed = [...sessions].reverse();
+
+  const active = reversed.find((session) => session.status === 'active' && sessionHasSales(session));
+  if (active) return active;
+
+  // Play may have been pressed while session was still "configuring".
+  const configuring = reversed.find(
+    (session) => session.status === 'configuring' && sessionHasSales(session),
+  );
+  if (configuring) return configuring;
+
+  // Retry a finished session that never reached Sales History.
+  return reversed.find(
+    (session) =>
+      ['completed', 'reset'].includes(session.status)
+      && sessionHasSales(session)
+      && !isSessionPersisted(session.id),
+  ) ?? null;
+}
+
+export async function trackGameEnd(reason = 'reset', context = {}) {
+  const sessions = loadSessions();
+  const targetSession = findSessionToFinalize(sessions);
+
+  if (!targetSession) {
     notifyUpdate();
-    return;
+    return { ok: true, skipped: true };
   }
 
   const finalWinningNumber = context.finalWinningNumber ?? context.final_winning_number ?? null;
   const calledCount = context.calledCount ?? context.called_count;
+  const alreadyPersisted = isSessionPersisted(targetSession.id);
+  const wasOpen = targetSession.status === 'active' || targetSession.status === 'configuring';
 
-  activeSession.status = reason === 'winner' ? 'completed' : 'reset';
-  activeSession.endedAt = new Date().toISOString();
+  if (wasOpen) {
+    targetSession.status = reason === 'winner' ? 'completed' : 'reset';
+    targetSession.endedAt = new Date().toISOString();
 
-  if (finalWinningNumber != null) {
-    activeSession.finalWinningNumber = Number(finalWinningNumber);
+    if (finalWinningNumber != null) {
+      targetSession.finalWinningNumber = Number(finalWinningNumber);
+    }
+
+    if (Number.isFinite(Number(calledCount))) {
+      targetSession.calledCount = Number(calledCount);
+    }
+
+    saveSessions(sessions);
   }
 
-  if (Number.isFinite(Number(calledCount))) {
-    activeSession.calledCount = Number(calledCount);
+  if (alreadyPersisted) {
+    notifyUpdate();
+    return { ok: true, skipped: true, sessionId: targetSession.id };
   }
 
-  saveSessions(sessions);
-  void persistCompletedSession(activeSession, {
-    completionReason: reason === 'winner' ? 'winner' : 'reset',
-    finalWinningNumber: activeSession.finalWinningNumber,
+  const result = await persistCompletedSession(targetSession, {
+    completionReason: reason === 'winner' || targetSession.status === 'completed' ? 'winner' : 'reset',
+    finalWinningNumber: targetSession.finalWinningNumber ?? finalWinningNumber,
   });
+
+  notifyUpdate();
+  return { ok: Boolean(result?.ok), sessionId: targetSession.id, ...result };
 }
 
 function getWinnerRecordId(settlement) {
@@ -259,7 +316,7 @@ function getWinnerRecordId(settlement) {
   return `${recordedAt}:${cartelaNumber}:${totalPool}`;
 }
 
-export function trackWinnerSettlement(settlement) {
+export async function trackWinnerSettlement(settlement) {
   if (!settlement) return;
 
   const recordId = getWinnerRecordId(settlement);
@@ -339,10 +396,14 @@ export function trackWinnerSettlement(settlement) {
   const completedSession = targetSession
     ?? sessions[sessions.length - 1];
 
-  void persistCompletedSession(completedSession, {
-    completionReason: 'winner',
-    finalWinningNumber: completedSession?.finalWinningNumber ?? null,
-  });
+  if (completedSession && !isSessionPersisted(completedSession.id)) {
+    await persistCompletedSession(completedSession, {
+      completionReason: 'winner',
+      finalWinningNumber: completedSession?.finalWinningNumber ?? null,
+    });
+  }
+
+  notifyUpdate();
 }
 
 export function recordCheckCardWinner({

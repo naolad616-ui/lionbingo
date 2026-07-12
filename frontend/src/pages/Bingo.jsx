@@ -16,6 +16,7 @@ import {
   resolveBetAmount,
   stepBetAmount,
 } from '../utils/gameSetupSettings';
+import { trackGameStart } from '../utils/gameSalesTracking';
 
 const TOTAL_CARDS = 150;
 
@@ -152,6 +153,15 @@ export default function Bingo() {
     }
 
     persistClosedValue(gameCount);
+
+    // Mark the sales session active as soon as Play starts the game flow.
+    trackGameStart({
+      betAmount,
+      cardsSold,
+      selectedCartelas,
+      totalSales: Number(betAmount) * Number(cardsSold),
+    });
+
     navigate('/caller', { state: { betAmount, cardsSold, selectedCartelas, closed: gameCount } });
   }, [navigate, betAmount, cardsSold, selectedCartelas, gameCount]);
 

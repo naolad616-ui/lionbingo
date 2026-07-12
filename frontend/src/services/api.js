@@ -170,6 +170,9 @@ export async function lockGamePrize({
 }
 
 export async function resetGameState(roomId = 'default', snapshot = {}) {
+  // Commit Sales History before clearing backend game state.
+  await trackGameEnd('reset', snapshot);
+
   const response = await apiFetch('/api/game/reset', {
     method: 'POST',
     body: JSON.stringify({ roomId }),
@@ -180,7 +183,6 @@ export async function resetGameState(roomId = 'default', snapshot = {}) {
   }
 
   const data = await response.json();
-  trackGameEnd('reset', snapshot);
   return { ok: true, data };
 }
 
