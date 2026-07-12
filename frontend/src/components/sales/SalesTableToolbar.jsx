@@ -37,7 +37,7 @@ export default function SalesTableToolbar({
   selectedDate,
   onDateChange,
   onFetch,
-  totalCollected,
+  totalCommission,
 }) {
   const showDateInput = period !== 'all';
   const dateInputType = resolveDateInputType(period);
@@ -46,7 +46,7 @@ export default function SalesTableToolbar({
     <div className="flex flex-col gap-2 border-b border-gray-300 bg-[#f5f5f0] px-3 py-2 sm:flex-row sm:items-center sm:justify-end sm:px-4">
       <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-sm font-semibold text-gray-900 sm:text-base">
-          {Math.round(totalCollected).toLocaleString()}-(ETB)
+          {Math.round(Number(totalCommission || 0)).toLocaleString()}-(ETB)
         </span>
 
         <select

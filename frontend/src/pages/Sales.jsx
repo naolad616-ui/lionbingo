@@ -1,6 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
 import Header from '../components/layout/Header';
-import SalesDailySummary from '../components/sales/SalesDailySummary';
 import SalesSubHeader from '../components/sales/SalesSubHeader';
 import SalesTableToolbar from '../components/sales/SalesTableToolbar';
 import SalesTable from '../components/sales/SalesTable';
@@ -25,8 +24,8 @@ export default function Sales() {
   const [appliedDate, setAppliedDate] = useState(today);
   const sales = useGameSalesHistory({ period: appliedPeriod, date: appliedDate });
 
-  const totalCollected = useMemo(
-    () => sales.tableRows.reduce((sum, row) => sum + Number(row.collected || 0), 0),
+  const totalCommission = useMemo(
+    () => sales.tableRows.reduce((sum, row) => sum + Number(row.commission || 0), 0),
     [sales.tableRows],
   );
 
@@ -45,7 +44,6 @@ export default function Sales() {
           className="overflow-hidden rounded-sm border border-gray-300 bg-white shadow-sm"
         >
           <SalesSubHeader period={appliedPeriod} />
-          <SalesDailySummary summary={sales} period={appliedPeriod} />
           <SalesTableToolbar
             period={period}
             periodOptions={PERIOD_OPTIONS}
@@ -53,7 +51,7 @@ export default function Sales() {
             selectedDate={selectedDate}
             onDateChange={setSelectedDate}
             onFetch={handleFetch}
-            totalCollected={totalCollected}
+            totalCommission={totalCommission}
           />
           <SalesTable records={sales.tableRows} loading={sales.loading} period={appliedPeriod} />
         </section>
