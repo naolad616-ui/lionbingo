@@ -40,11 +40,15 @@ export function buildHistoryRecordFromSession(session, {
   const endedAt = session.endedAt || new Date().toISOString();
   const isWinner = completionReason === 'winner' || session.status === 'completed';
 
-  let commission = breakdown.commission;
+  // Commission must always be house commission only — never total collected sales.
+  let commission = Number(
+    session.prizeSnapshot?.houseCommission
+      ?? (Number(session.houseProfit) > 0 ? session.houseProfit : null)
+      ?? breakdown.commission,
+  );
   let winnerPayout = breakdown.winnerPrize;
 
   if (session.status === 'reset' || completionReason === 'reset') {
-    commission = breakdown.totalSales;
     winnerPayout = 0;
   } else if (isWinner && Number(session.houseProfit) > 0) {
     commission = Number(session.houseProfit);
