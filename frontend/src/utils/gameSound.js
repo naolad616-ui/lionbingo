@@ -50,7 +50,7 @@ function listGameSoundFiles() {
       files.push(fileName);
     }
   }
-  files.push('win.mp3', 'not-win.mp3', 'pause.mp3', 'shuffle.mp3');
+  files.push('win.mp3', 'not-win.mp3', 'pause.mp3', 'shuffle.mp3', 'dede.mp3');
   return files;
 }
 
@@ -595,6 +595,10 @@ export function playPauseSound() {
 
 export function playShuffleSound() {
   return playSoundFile('shuffle.mp3', { logLabel: 'shuffle' });
+}
+
+export function playDuplicateCartelaSound() {
+  return playSoundFile('dede.mp3', { logLabel: 'duplicate-cartela' });
 }
 
 export async function playWinThenPauseSounds() {

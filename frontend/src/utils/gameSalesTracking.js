@@ -344,11 +344,26 @@ export async function trackWinnerSettlement(settlement) {
     .find((session) => session.status === 'active' || session.status === 'configuring');
 
   if (targetSession) {
+    const existingHouseCommission = Number(
+      targetSession.prizeSnapshot?.houseCommission ?? targetSession.houseProfit ?? 0,
+    );
+    const existingPrizePool = Number(targetSession.prizeSnapshot?.prizePool ?? 0);
+    const resolvedTotalPool = totalPool || Number(targetSession.totalSales || 0);
+    // Never overwrite a known non-zero house commission with 0.
+    const resolvedHouseProfit = (houseProfit === 0 && existingHouseCommission > 0)
+      ? existingHouseCommission
+      : houseProfit;
+    const resolvedWinnerPayout = (houseProfit === 0 && existingHouseCommission > 0 && winnerPayout === 0)
+      ? (existingPrizePool > 0
+        ? existingPrizePool
+        : Math.max(0, resolvedTotalPool - existingHouseCommission))
+      : winnerPayout;
+
     targetSession.status = 'completed';
     targetSession.endedAt = recordedAt;
-    targetSession.winnerPayout = winnerPayout;
-    targetSession.houseProfit = houseProfit;
-    targetSession.totalSales = totalPool || targetSession.totalSales;
+    targetSession.winnerPayout = resolvedWinnerPayout;
+    targetSession.houseProfit = resolvedHouseProfit;
+    targetSession.totalSales = resolvedTotalPool || targetSession.totalSales;
     targetSession.cardsSold = cardsSold || targetSession.cardsSold;
     targetSession.cartelaNumber = cartelaNumber;
     targetSession.matchedPattern = matchedPattern;
@@ -359,9 +374,9 @@ export async function trackWinnerSettlement(settlement) {
       targetSession.calledCount = Number(calledCount);
     }
     applyBackendPrizeSnapshot(targetSession, {
-      totalSales: totalPool || targetSession.totalSales,
-      houseCommission: houseProfit,
-      prizePool: winnerPayout,
+      totalSales: resolvedTotalPool || targetSession.totalSales,
+      houseCommission: resolvedHouseProfit,
+      prizePool: resolvedWinnerPayout,
       commissionRate: settlement.commissionRate ?? targetSession.commissionRate ?? 0,
     });
   } else {
@@ -422,9 +437,32 @@ export function recordCheckCardWinner({
     return;
   }
 
+  const existingHouseCommission = Number(
+    openSession.prizeSnapshot?.houseCommission ?? openSession.houseProfit ?? 0,
+  );
+  const existingPrizePool = Number(openSession.prizeSnapshot?.prizePool ?? 0);
   const totalPool = Number(prize?.totalSales ?? openSession.totalSales ?? 0);
-  const winnerPayout = Number(prize?.prizePool ?? 0);
-  const houseProfit = Number(prize?.houseCommission ?? 0);
+
+  // If prize is missing, keep the existing snapshot commission/prize pool.
+  // If prize is present but commission is 0, do not wipe a known non-zero commission.
+  const incomingHouseCommission = prize == null
+    ? null
+    : Number(prize.houseCommission ?? 0);
+  const hasValidIncomingCommission = incomingHouseCommission != null && incomingHouseCommission > 0;
+
+  const houseProfit = hasValidIncomingCommission
+    ? incomingHouseCommission
+    : (existingHouseCommission > 0
+      ? existingHouseCommission
+      : Number(incomingHouseCommission ?? existingHouseCommission ?? 0));
+
+  const winnerPayout = hasValidIncomingCommission
+    ? Number(prize.prizePool ?? 0)
+    : (existingHouseCommission > 0
+      ? (existingPrizePool > 0
+        ? existingPrizePool
+        : Math.max(0, totalPool - existingHouseCommission))
+      : Number(prize?.prizePool ?? existingPrizePool ?? 0));
 
   trackWinnerSettlement({
     cartelaNumber,
@@ -435,7 +473,10 @@ export function recordCheckCardWinner({
     winnerPayout,
     houseProfit,
     cardsSold: prize?.cardsSold ?? openSession.cardsSold,
-    commissionRate: prize?.commissionRate ?? openSession.commissionRate ?? 0,
+    commissionRate: prize?.commissionRate
+      ?? openSession.prizeSnapshot?.commissionRate
+      ?? openSession.commissionRate
+      ?? 0,
     recordedAt: new Date().toISOString(),
   });
 }

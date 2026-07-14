@@ -5,6 +5,7 @@ import BingoSubHeader from '../components/bingo/BingoSubHeader';
 import BingoCardGrid from '../components/bingo/BingoCardGrid';
 import BingoControlBar from '../components/bingo/BingoControlBar';
 import EnterCartelaModal from '../components/bingo/EnterCartelaModal';
+import DuplicateCartelaModal from '../components/bingo/DuplicateCartelaModal';
 import SelectCardWarningModal from '../components/bingo/SelectCardWarningModal';
 import CartelaNumberCallout from '../components/bingo/CartelaNumberCallout';
 import { useWinnerPrize } from '../hooks/useWinnerPrize';
@@ -27,6 +28,7 @@ export default function Bingo() {
   const [betAmount, setBetAmount] = useState(() => resolveBetAmount(readStoredBetAmount()));
   const [setupHydrated, setSetupHydrated] = useState(false);
   const [enterCardOpen, setEnterCardOpen] = useState(false);
+  const [duplicateWarningOpen, setDuplicateWarningOpen] = useState(false);
   const [playWarningOpen, setPlayWarningOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(() => Boolean(document.fullscreenElement));
   const [cartelaCallout, setCartelaCallout] = useState(null);
@@ -132,7 +134,10 @@ export default function Bingo() {
   const handleEnterCardConfirm = useCallback((cartelaNumber) => {
     const parsed = Number.parseInt(cartelaNumber, 10);
     if (!Number.isFinite(parsed) || parsed < 1 || parsed > TOTAL_CARDS) return;
-    if (selectedCards.has(parsed)) return;
+    if (selectedCards.has(parsed)) {
+      setDuplicateWarningOpen(true);
+      return;
+    }
 
     showCartelaCallout(parsed);
     setSelectedCards((current) => {
@@ -196,6 +201,11 @@ export default function Bingo() {
         open={enterCardOpen}
         onClose={() => setEnterCardOpen(false)}
         onConfirm={handleEnterCardConfirm}
+      />
+
+      <DuplicateCartelaModal
+        open={duplicateWarningOpen}
+        onClose={() => setDuplicateWarningOpen(false)}
       />
 
       <SelectCardWarningModal
