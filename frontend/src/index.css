@@ -862,7 +862,7 @@ html.bingo-cartela-fullscreen .bingo-control-bar-right {
 
 .bingo-caller-cell {
   position: relative;
-  background: #8e9aaa;
+  background: #455a64;
   color: #000000;
   font-size: clamp(1.55rem, 3.15vw, 2.35rem);
   font-variant-numeric: tabular-nums;
