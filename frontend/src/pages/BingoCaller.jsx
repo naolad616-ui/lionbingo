@@ -12,13 +12,15 @@ import {
   preloadGameSounds,
   stopGameSounds,
 } from '../utils/gameSound';
-import { preloadCartelas } from '../utils/cartelaCache';
+import { clearCartelaCache, preloadCartelas } from '../utils/cartelaCache';
 import {
   cacheGamePatterns,
   clearGameSessionCache,
+  warmGameSessionCache,
 } from '../utils/gameSessionCache';
 import getSocket from '../services/socket';
 import {
+  fetchPatternSettings,
   fetchSoundSettings,
   lockGamePrize,
   resetGameState,
@@ -162,6 +164,11 @@ export default function BingoCaller() {
   const startCalling = useCallback(async () => {
     if (drawIndexRef.current >= drawOrder.length) return;
 
+    // Cache every selected cartela before balls are drawn so offline CHECK
+    // works for all of them without a prior online check.
+    warmGameSessionCache({ selectedCartelas });
+    await preloadCartelas(selectedCartelas);
+
     const lockResult = await lockGamePrize({ betAmount, cardsSold, selectedCartelas, closed });
     if (lockResult.ok && lockResult.state?.patterns) {
       cacheGamePatterns(lockResult.state.patterns);
@@ -293,6 +300,7 @@ export default function BingoCaller() {
     stopGameSounds();
     clearAllMissedClaims();
     clearGameSessionCache();
+    clearCartelaCache();
     await resetGameState('default', snapshot);
     navigate('/bingo', { replace: true });
   }, [calledNumbers, clearIntervalTimer, clearShuffleHideTimer, navigate]);
@@ -310,9 +318,15 @@ export default function BingoCaller() {
   }, [isRunning]);
 
   useEffect(() => {
-    // Warm audio + cartela caches once on mount so checks/calls stay local.
+    // Warm audio + every selected cartela + patterns as soon as the caller opens.
+    warmGameSessionCache({ selectedCartelas });
     void preloadGameSounds();
     void preloadCartelas(selectedCartelas);
+    void fetchPatternSettings().then((result) => {
+      if (result.ok && result.patterns) {
+        cacheGamePatterns(result.patterns);
+      }
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- warm once when caller opens
   }, []);
 

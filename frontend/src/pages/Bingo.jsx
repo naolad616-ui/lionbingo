@@ -9,7 +9,7 @@ import DuplicateCartelaModal from '../components/bingo/DuplicateCartelaModal';
 import SelectCardWarningModal from '../components/bingo/SelectCardWarningModal';
 import CartelaNumberCallout from '../components/bingo/CartelaNumberCallout';
 import { useWinnerPrize } from '../hooks/useWinnerPrize';
-import { fetchGameSetupSettings, saveGameSetupSettings } from '../services/api';
+import { fetchGameSetupSettings, saveGameSetupSettings, fetchPatternSettings } from '../services/api';
 import { persistClosedValue, readStoredClosedValue, resolveClosedValue } from '../utils/closedRules';
 import {
   persistBetAmount,
@@ -18,6 +18,8 @@ import {
   stepBetAmount,
 } from '../utils/gameSetupSettings';
 import { trackGameStart } from '../utils/gameSalesTracking';
+import { preloadCartelas } from '../utils/cartelaCache';
+import { warmGameSessionCache } from '../utils/gameSessionCache';
 
 const TOTAL_CARDS = 150;
 
@@ -167,8 +169,17 @@ export default function Bingo() {
       totalSales: Number(betAmount) * Number(cardsSold),
     });
 
+    // Cache every selected cartela + patterns immediately — do not wait for CHECK.
+    warmGameSessionCache({ selectedCartelas });
+    void preloadCartelas(selectedCartelas);
+    void fetchPatternSettings().then((result) => {
+      if (result.ok && result.patterns) {
+        warmGameSessionCache({ selectedCartelas, patterns: result.patterns });
+      }
+    });
+
     navigate('/caller', { state: { betAmount, cardsSold, selectedCartelas, closed: gameCount } });
-  }, [navigate, betAmount, cardsSold, selectedCartelas, gameCount]);
+  }, [navigate, betAmount, cardsSold, selectedCartelas, gameCount, selectedCards.size]);
 
   return (
     <div className="bingo-select-screen min-h-screen bg-lion-page">
