@@ -13,6 +13,10 @@ import {
   stopGameSounds,
 } from '../utils/gameSound';
 import { preloadCartelas } from '../utils/cartelaCache';
+import {
+  cacheGamePatterns,
+  clearGameSessionCache,
+} from '../utils/gameSessionCache';
 import getSocket from '../services/socket';
 import {
   fetchSoundSettings,
@@ -158,7 +162,11 @@ export default function BingoCaller() {
   const startCalling = useCallback(async () => {
     if (drawIndexRef.current >= drawOrder.length) return;
 
-    await lockGamePrize({ betAmount, cardsSold, selectedCartelas, closed });
+    const lockResult = await lockGamePrize({ betAmount, cardsSold, selectedCartelas, closed });
+    if (lockResult.ok && lockResult.state?.patterns) {
+      cacheGamePatterns(lockResult.state.patterns);
+    }
+
     await refreshCallInterval();
 
     clearIntervalTimer();
@@ -284,6 +292,7 @@ export default function BingoCaller() {
     previousCalledCountRef.current = 0;
     stopGameSounds();
     clearAllMissedClaims();
+    clearGameSessionCache();
     await resetGameState('default', snapshot);
     navigate('/bingo', { replace: true });
   }, [calledNumbers, clearIntervalTimer, clearShuffleHideTimer, navigate]);
@@ -343,6 +352,9 @@ export default function BingoCaller() {
     const handleGameState = (state) => {
       if (state?.intervalMs != null) {
         applyCallInterval(state.intervalMs);
+      }
+      if (state?.patterns) {
+        cacheGamePatterns(state.patterns);
       }
     };
 

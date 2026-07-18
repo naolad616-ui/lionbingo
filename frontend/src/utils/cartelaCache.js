@@ -1,14 +1,29 @@
 import { fetchCartela } from '../services/api';
+import { isBrowserOnline } from './networkStatus';
 
 /** In-memory cartela payloads so Check Cartela can skip the network. */
 const cartelaResponseCache = new Map();
 let preloadPromise = null;
 
-export async function getCachedCartela(cartelaNo) {
+export function peekCachedCartela(cartelaNo) {
   const key = String(cartelaNo ?? '').trim();
   const cached = cartelaResponseCache.get(key);
-  if (cached) {
-    return { ok: true, data: cached, fromCache: true };
+  if (!cached) {
+    return { ok: false, error: 'not-found', fromCache: false };
+  }
+
+  return { ok: true, data: cached, fromCache: true };
+}
+
+export async function getCachedCartela(cartelaNo, { allowNetwork = true } = {}) {
+  const key = String(cartelaNo ?? '').trim();
+  const cached = peekCachedCartela(key);
+  if (cached.ok) {
+    return cached;
+  }
+
+  if (!allowNetwork || !isBrowserOnline()) {
+    return { ok: false, error: 'not-found', fromCache: false };
   }
 
   const started = performance.now();

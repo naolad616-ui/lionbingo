@@ -56,63 +56,75 @@ export async function apiFetch(path, options = {}) {
 export async function fetchCartela(cartelaNo) {
   const trimmed = String(cartelaNo ?? '').trim();
   const started = performance.now();
-  const response = await apiFetch(`/api/cartela/${encodeURIComponent(trimmed)}`);
-  const headersMs = performance.now() - started;
-  const serverTiming = response.headers.get('server-timing');
 
-  if (response.status === 404 || response.status === 500) {
+  try {
+    const response = await apiFetch(`/api/cartela/${encodeURIComponent(trimmed)}`);
+    const headersMs = performance.now() - started;
+    const serverTiming = response.headers.get('server-timing');
+
+    if (response.status === 404 || response.status === 500) {
+      console.log('[check-cartela-profile]', JSON.stringify({
+        step: 'fetchCartela',
+        cartelaNo: trimmed,
+        ok: false,
+        status: response.status,
+        networkMs: Number(headersMs.toFixed(2)),
+        serverTiming,
+      }));
+      return { ok: false, status: response.status, error: 'not-found' };
+    }
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      console.log('[check-cartela-profile]', JSON.stringify({
+        step: 'fetchCartela',
+        cartelaNo: trimmed,
+        ok: false,
+        status: response.status,
+        networkMs: Number((performance.now() - started).toFixed(2)),
+        serverTiming,
+      }));
+      return {
+        ok: false,
+        status: response.status,
+        error: body.error || 'Failed to fetch cartela',
+      };
+    }
+
+    const data = await response.json();
     console.log('[check-cartela-profile]', JSON.stringify({
       step: 'fetchCartela',
       cartelaNo: trimmed,
-      ok: false,
-      status: response.status,
-      networkMs: Number(headersMs.toFixed(2)),
-      serverTiming,
-    }));
-    return { ok: false, status: response.status, error: 'not-found' };
-  }
-
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    console.log('[check-cartela-profile]', JSON.stringify({
-      step: 'fetchCartela',
-      cartelaNo: trimmed,
-      ok: false,
-      status: response.status,
+      ok: true,
       networkMs: Number((performance.now() - started).toFixed(2)),
       serverTiming,
     }));
+    return { ok: true, data };
+  } catch (error) {
     return {
       ok: false,
-      status: response.status,
-      error: body.error || 'Failed to fetch cartela',
+      error: error.message || 'Failed to fetch cartela',
     };
   }
-
-  const data = await response.json();
-  console.log('[check-cartela-profile]', JSON.stringify({
-    step: 'fetchCartela',
-    cartelaNo: trimmed,
-    ok: true,
-    networkMs: Number((performance.now() - started).toFixed(2)),
-    serverTiming,
-  }));
-  return { ok: true, data };
 }
 
 export async function fetchGameState(roomId = 'default') {
-  const response = await apiFetch(`/api/game/state?roomId=${encodeURIComponent(roomId)}`);
+  try {
+    const response = await apiFetch(`/api/game/state?roomId=${encodeURIComponent(roomId)}`);
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return { ok: false, calledNumbers: [], data: null };
+    }
+
+    const data = await response.json();
+    return {
+      ok: true,
+      calledNumbers: Array.isArray(data.calledNumbers) ? data.calledNumbers : [],
+      data,
+    };
+  } catch {
     return { ok: false, calledNumbers: [], data: null };
   }
-
-  const data = await response.json();
-  return {
-    ok: true,
-    calledNumbers: Array.isArray(data.calledNumbers) ? data.calledNumbers : [],
-    data,
-  };
 }
 
 export async function configureGameSales({
@@ -122,24 +134,28 @@ export async function configureGameSales({
   closed,
   roomId = 'default',
 }) {
-  const response = await apiFetch('/api/game/configure', {
-    method: 'POST',
-    body: JSON.stringify({ betAmount, cardsSold, selectedCartelas, closed, roomId }),
-  });
+  try {
+    const response = await apiFetch('/api/game/configure', {
+      method: 'POST',
+      body: JSON.stringify({ betAmount, cardsSold, selectedCartelas, closed, roomId }),
+    });
 
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    return { ok: false, error: body.error || 'Failed to configure game sales' };
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      return { ok: false, error: body.error || 'Failed to configure game sales' };
+    }
+
+    const data = await response.json();
+    console.log('[sales-trace] configureGameSales response', {
+      source: 'backend',
+      sales: data.sales ?? null,
+      prize: data.prize ?? null,
+    });
+    trackCartelaPurchase(data.sales, data.prize);
+    return { ok: true, ...data };
+  } catch (error) {
+    return { ok: false, error: error.message || 'Failed to configure game sales' };
   }
-
-  const data = await response.json();
-  console.log('[sales-trace] configureGameSales response', {
-    source: 'backend',
-    sales: data.sales ?? null,
-    prize: data.prize ?? null,
-  });
-  trackCartelaPurchase(data.sales, data.prize);
-  return { ok: true, ...data };
 }
 
 export async function lockGamePrize({
@@ -149,41 +165,50 @@ export async function lockGamePrize({
   closed,
   roomId = 'default',
 }) {
-  const response = await apiFetch('/api/game/lock-prize', {
-    method: 'POST',
-    body: JSON.stringify({ betAmount, cardsSold, selectedCartelas, closed, roomId }),
-  });
+  try {
+    const response = await apiFetch('/api/game/lock-prize', {
+      method: 'POST',
+      body: JSON.stringify({ betAmount, cardsSold, selectedCartelas, closed, roomId }),
+    });
 
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    return { ok: false, error: body.error || 'Failed to lock game prize' };
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      return { ok: false, error: body.error || 'Failed to lock game prize' };
+    }
+
+    const data = await response.json();
+    console.log('[sales-trace] lockGamePrize response', {
+      source: 'backend',
+      sales: data.sales ?? null,
+      prize: data.prize ?? null,
+    });
+    trackGameStart(data.sales, data.prize);
+    return { ok: true, ...data };
+  } catch (error) {
+    return { ok: false, error: error.message || 'Failed to lock game prize' };
   }
-
-  const data = await response.json();
-  console.log('[sales-trace] lockGamePrize response', {
-    source: 'backend',
-    sales: data.sales ?? null,
-    prize: data.prize ?? null,
-  });
-  trackGameStart(data.sales, data.prize);
-  return { ok: true, ...data };
 }
 
 export async function resetGameState(roomId = 'default', snapshot = {}) {
   // Commit Sales History before clearing backend game state.
+  // Local session finalization always runs; backend reset is best-effort when offline.
   await trackGameEnd('reset', snapshot);
 
-  const response = await apiFetch('/api/game/reset', {
-    method: 'POST',
-    body: JSON.stringify({ roomId }),
-  });
+  try {
+    const response = await apiFetch('/api/game/reset', {
+      method: 'POST',
+      body: JSON.stringify({ roomId }),
+    });
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return { ok: false };
+    }
+
+    const data = await response.json();
+    return { ok: true, data };
+  } catch {
     return { ok: false };
   }
-
-  const data = await response.json();
-  return { ok: true, data };
 }
 
 export async function shuffleGameState(roomId = 'default') {
@@ -201,19 +226,23 @@ export async function shuffleGameState(roomId = 'default') {
 }
 
 export async function fetchSoundSettings() {
-  const response = await apiFetch('/api/settings/sound');
+  try {
+    const response = await apiFetch('/api/settings/sound');
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return { ok: false, speed: null, voice: null, intervalMs: null };
+    }
+
+    const data = await response.json();
+    return {
+      ok: true,
+      speed: data.speed,
+      voice: data.voice,
+      intervalMs: data.intervalMs,
+    };
+  } catch {
     return { ok: false, speed: null, voice: null, intervalMs: null };
   }
-
-  const data = await response.json();
-  return {
-    ok: true,
-    speed: data.speed,
-    voice: data.voice,
-    intervalMs: data.intervalMs,
-  };
 }
 
 export async function saveSoundSettings({ speed, voice, roomId = 'default' }) {
@@ -237,14 +266,18 @@ export async function saveSoundSettings({ speed, voice, roomId = 'default' }) {
 }
 
 export async function fetchPatternSettings() {
-  const response = await apiFetch('/api/settings/patterns');
+  try {
+    const response = await apiFetch('/api/settings/patterns');
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return { ok: false, patterns: null };
+    }
+
+    const patterns = await response.json();
+    return { ok: true, patterns };
+  } catch {
     return { ok: false, patterns: null };
   }
-
-  const patterns = await response.json();
-  return { ok: true, patterns };
 }
 
 export async function savePatternSettings(patterns) {
@@ -322,18 +355,22 @@ export async function saveCommissionTiers(tiers) {
 }
 
 export async function checkCartelaInGame(cartelaNumber, roomId = 'default') {
-  const response = await apiFetch('/api/game/check', {
-    method: 'POST',
-    body: JSON.stringify({ cartelaNumber, roomId }),
-  });
+  try {
+    const response = await apiFetch('/api/game/check', {
+      method: 'POST',
+      body: JSON.stringify({ cartelaNumber, roomId }),
+    });
 
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    return { ok: false, error: body.error || 'Failed to check cartela' };
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      return { ok: false, error: body.error || 'Failed to check cartela' };
+    }
+
+    const data = await response.json();
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false, error: error.message || 'Failed to check cartela' };
   }
-
-  const data = await response.json();
-  return { ok: true, data };
 }
 
 export async function fetchUserProfile() {

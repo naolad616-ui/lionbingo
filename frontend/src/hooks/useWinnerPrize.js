@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { configureGameSales, fetchGameState } from '../services/api';
 import getSocket from '../services/socket';
+import { cacheGamePatterns } from '../utils/gameSessionCache';
 
 function extractPrizePool(state) {
   const prize = state?.prize?.prizePool ?? state?.prizePool ?? 0;
@@ -20,6 +21,9 @@ export function useWinnerPrize({
 
   const applyState = useCallback((state) => {
     const prizePool = extractPrizePool(state);
+    if (state?.patterns && typeof state.patterns === 'object') {
+      cacheGamePatterns(state.patterns);
+    }
     console.log('[sales-trace] useWinnerPrize applyState', {
       source: 'backend',
       prizePool,

@@ -36,10 +36,29 @@ import {
 import { getCachedCartela } from '../../utils/cartelaCache';
 import { recordCheckCardWinner } from '../../utils/gameSalesTracking';
 import {
+  cacheGamePatterns,
+  getCachedGamePatterns,
+} from '../../utils/gameSessionCache';
+import { isBrowserOnline } from '../../utils/networkStatus';
+import { loadSidebarPatternSettings } from '../../utils/sidebarSettingsStorage';
+import {
   playCheckCardResultSounds,
   primeCheckCardSoundPlayback,
   resetCheckCardSoundState,
 } from '../../utils/gameSound';
+
+function resolveLocalPatternSettings(currentPatterns) {
+  if (currentPatterns && typeof currentPatterns === 'object') {
+    return currentPatterns;
+  }
+
+  const sessionPatterns = getCachedGamePatterns();
+  if (sessionPatterns) {
+    return sessionPatterns;
+  }
+
+  return loadSidebarPatternSettings();
+}
 
 function runCheckCardValidation({
   numbers,
@@ -291,11 +310,17 @@ export default function CheckCardModal({
     }
 
     if (state?.patterns && typeof state.patterns === 'object') {
+      cacheGamePatterns(state.patterns);
       setPatternSettings(state.patterns);
     }
   }, []);
 
   const refreshBackendGameState = useCallback(async () => {
+    if (!isBrowserOnline()) {
+      setPatternSettings((current) => resolveLocalPatternSettings(current));
+      return;
+    }
+
     const result = await fetchGameState();
     if (result.ok && result.data) {
       applyBackendGameState(result.data);
@@ -303,6 +328,7 @@ export default function CheckCardModal({
       if (!result.data.patterns) {
         const patternsResult = await fetchPatternSettings();
         if (patternsResult.ok && patternsResult.patterns) {
+          cacheGamePatterns(patternsResult.patterns);
           setPatternSettings(patternsResult.patterns);
         }
       }
@@ -313,8 +339,12 @@ export default function CheckCardModal({
     // Fallback: warm patterns so the next CHECK can stay local.
     const patternsResult = await fetchPatternSettings();
     if (patternsResult.ok && patternsResult.patterns) {
+      cacheGamePatterns(patternsResult.patterns);
       setPatternSettings((current) => current ?? patternsResult.patterns);
+      return;
     }
+
+    setPatternSettings((current) => resolveLocalPatternSettings(current));
   }, [applyBackendGameState]);
 
   const evaluateCard = useCallback(async (trimmedCartelaNo, checkActionId, options = {}) => {
@@ -341,21 +371,30 @@ export default function CheckCardModal({
     const knownSelectedCartelas = Array.isArray(selectedCartelasProp)
       ? selectedCartelasProp
       : selectedCartelas;
+    const online = isBrowserOnline();
     let activePatterns = patternSettings;
     let backendCalls = backendCalledNumbers;
     let gameData = null;
 
+    // Offline: use locked/session/sidebar patterns — never wait on the network.
+    if ((!activePatterns || typeof activePatterns !== 'object') && !online) {
+      activePatterns = resolveLocalPatternSettings(null);
+      if (activePatterns) {
+        setPatternSettings(activePatterns);
+      }
+    }
+
     const needsPatterns = !activePatterns || typeof activePatterns !== 'object';
 
-    // Fetch cartela (cached) in parallel with patterns/game state only when missing.
+    // Fetch cartela (cached) in parallel with patterns/game state only when missing online.
     const cartelaFetchStarted = performance.now();
-    const cartelaPromise = getCachedCartela(trimmedCartelaNo).then((result) => ({
+    const cartelaPromise = getCachedCartela(trimmedCartelaNo, { allowNetwork: online }).then((result) => ({
       result,
       fetchMs: performance.now() - cartelaFetchStarted,
       fromCache: Boolean(result.fromCache),
     }));
     const supportStarted = performance.now();
-    const supportPromise = needsPatterns
+    const supportPromise = needsPatterns && online
       ? (async () => {
         const [gameStateResult, patternsResult] = await Promise.all([
           fetchGameState(),
@@ -369,6 +408,10 @@ export default function CheckCardModal({
         const patterns = (data?.patterns && typeof data.patterns === 'object')
           ? data.patterns
           : (patternsResult.ok ? patternsResult.patterns : null);
+
+        if (patterns) {
+          cacheGamePatterns(patterns);
+        }
 
         return {
           data,
@@ -390,6 +433,14 @@ export default function CheckCardModal({
       }
       if (Array.isArray(support.backendCalls)) {
         backendCalls = support.backendCalls;
+      }
+    }
+
+    // Last resort after a failed online fetch (or offline gap): local cached patterns.
+    if (!activePatterns || typeof activePatterns !== 'object') {
+      activePatterns = resolveLocalPatternSettings(null);
+      if (activePatterns) {
+        setPatternSettings(activePatterns);
       }
     }
 
@@ -428,6 +479,7 @@ export default function CheckCardModal({
       step: 'evaluateCard',
       cartelaNo: trimmedCartelaNo,
       needsPatterns,
+      online,
       cartelaFromCache: cartelaPacket.fromCache,
       cartelaFetchMs: Number(cartelaPacket.fetchMs.toFixed(2)),
       supportMs: support ? Number(support.supportMs.toFixed(2)) : 0,
@@ -459,8 +511,8 @@ export default function CheckCardModal({
       return;
     }
 
-    // Keep session state fresh in the background (non-blocking).
-    if (!needsPatterns) {
+    // Keep session state fresh in the background (non-blocking) while online.
+    if (online && !needsPatterns) {
       void refreshBackendGameState();
     }
 
@@ -486,6 +538,10 @@ export default function CheckCardModal({
             gameData,
             soundKey,
           });
+        }
+
+        if (!isBrowserOnline()) {
+          return;
         }
 
         void checkCartelaInGame(trimmedCartelaNo).then((backendCheck) => {
@@ -520,7 +576,9 @@ export default function CheckCardModal({
       return undefined;
     }
 
-    refreshBackendGameState();
+    if (isBrowserOnline()) {
+      void refreshBackendGameState();
+    }
 
     const lockedCartelas = getLockedCartelas();
     const restoredCartela = lockedCartelas[0] ?? null;
@@ -544,7 +602,15 @@ export default function CheckCardModal({
       }
     };
 
-    const pollId = window.setInterval(refreshBackendGameState, 2000);
+    const pollId = window.setInterval(() => {
+      if (isBrowserOnline()) {
+        void refreshBackendGameState();
+      }
+    }, 2000);
+
+    const handleOnline = () => {
+      void refreshBackendGameState();
+    };
 
     const socket = getSocket();
     const handleGameState = (state) => {
@@ -557,7 +623,7 @@ export default function CheckCardModal({
       }
     };
 
-    if (!socket.connected) {
+    if (isBrowserOnline() && !socket.connected) {
       socket.connect();
     }
 
@@ -565,9 +631,11 @@ export default function CheckCardModal({
     socket.on('ball:called', handleBallCalled);
 
     window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('online', handleOnline);
     return () => {
       window.cancelAnimationFrame(frame);
       window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('online', handleOnline);
       window.clearInterval(pollId);
       socket.off('game:state', handleGameState);
       socket.off('ball:called', handleBallCalled);

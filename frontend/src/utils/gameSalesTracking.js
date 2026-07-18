@@ -167,6 +167,43 @@ async function persistCompletedSession(session, options = {}) {
   return result;
 }
 
+function getPendingSalesSessions(sessions = loadSessions()) {
+  return sessions.filter(
+    (session) =>
+      ['completed', 'reset'].includes(session.status)
+      && sessionHasSales(session)
+      && !isSessionPersisted(session.id),
+  );
+}
+
+/**
+ * Push any completed/reset games that were finalized offline to Sales History.
+ * Safe to call repeatedly; already-persisted sessions are skipped.
+ */
+export async function flushPendingSalesHistory() {
+  const pending = getPendingSalesSessions();
+  if (pending.length === 0) {
+    return { ok: true, flushed: 0 };
+  }
+
+  let flushed = 0;
+  for (const session of pending) {
+    const result = await persistCompletedSession(session, {
+      completionReason: session.status === 'completed' ? 'winner' : 'reset',
+      finalWinningNumber: session.finalWinningNumber ?? null,
+    });
+    if (result?.ok) {
+      flushed += 1;
+    }
+  }
+
+  if (flushed > 0) {
+    notifyUpdate();
+  }
+
+  return { ok: true, flushed };
+}
+
 export function trackCartelaPurchase(sales, prize = null) {
   if (!sales) return;
 
@@ -656,10 +693,18 @@ export function initGameSalesTracking() {
     }
   };
 
+  const handleOnline = () => {
+    void flushPendingSalesHistory();
+  };
+
   if (!socket.connected) {
     socket.connect();
   }
 
   socket.on('game:state', handleGameState);
   socket.on('bingo:validated', handleBingoValidated);
+  window.addEventListener('online', handleOnline);
+
+  // Catch up any games finalized while the connection was down.
+  void flushPendingSalesHistory();
 }
