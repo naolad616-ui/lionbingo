@@ -11,15 +11,12 @@ import getSocket from '../../services/socket';
 import {
   CHECK_CARD_MESSAGES,
   accumulateCartelaLineHighlights,
+  buildFinalCheckOutcome,
   isCartelaPurchased,
-  isCheckCardCelebrationWin,
-  isCheckCardExpiredMessage,
   mergeCalledNumbers,
   parseCartelaNumber,
   readStoredClosedValue,
-  resolveCheckCardMessage,
   resolveCheckCardStatusTone,
-  resolveCheckCardWinningCells,
   resolveClosedValue,
   snapshotCheckCardProgress,
   validateCheckCardWin,
@@ -42,7 +39,7 @@ import {
 import { isBrowserOnline } from '../../utils/networkStatus';
 import { loadSidebarPatternSettings } from '../../utils/sidebarSettingsStorage';
 import {
-  playCheckCardResultSounds,
+  playCheckCardOutcomeSound,
   primeCheckCardSoundPlayback,
   resetCheckCardSoundState,
 } from '../../utils/gameSound';
@@ -104,6 +101,7 @@ export default function CheckCardModal({
   const cardProgressRef = useRef(null);
   const checkActionIdRef = useRef(0);
   const cartelaNoRef = useRef('');
+  const manualCheckOutcomeRef = useRef(null);
   const [missedClaimRevision, setMissedClaimRevision] = useState(0);
   const [winnerConfettiKey, setWinnerConfettiKey] = useState(0);
   const previousStatusRef = useRef('');
@@ -129,6 +127,7 @@ export default function CheckCardModal({
     setIsLocked(false);
     cardProgressRef.current = null;
     previousStatusRef.current = '';
+    manualCheckOutcomeRef.current = null;
     resetCheckCardSoundState();
   }, []);
 
@@ -175,60 +174,40 @@ export default function CheckCardModal({
     return nextState;
   }, []);
 
-  const applyCheckOutcome = useCallback(({
-    trimmedCartelaNo,
-    nextCheckResult,
-    purchased,
-    callCount,
-    suppressCelebration = false,
-  }) => {
-    if (!isCurrentCartelaCheck(trimmedCartelaNo)) {
+  const applyFinalCheckOutcome = useCallback((outcome, { suppressCelebration = false } = {}) => {
+    if (!outcome || !isCurrentCartelaCheck(outcome.cartelaNo)) {
       return;
     }
 
-    const priorProgress = getPriorProgress(trimmedCartelaNo);
-    const priorState = getCartelaCheckState(trimmedCartelaNo);
-    const priorMiss = getActiveMissState(trimmedCartelaNo);
-    const message = resolveCheckCardMessage({
-      cartFound: true,
-      checkResult: nextCheckResult,
-      isPurchased: purchased,
-      priorProgress,
-      priorMiss,
-    });
-    const nextWinningCells = resolveCheckCardWinningCells(
-      nextCheckResult,
-      purchased,
-      priorState,
-      priorProgress,
-      priorMiss,
-    );
-
-    setCheckResult(nextCheckResult);
-    setStatusMessage(message);
-    setDisplayWinningCells(nextWinningCells);
+    setCheckResult(outcome.checkResult);
+    setStatusMessage(outcome.message);
+    setDisplayWinningCells([...outcome.winningCells]);
 
     if (
       !suppressCelebration
-      && message === CHECK_CARD_MESSAGES.winner
+      && outcome.message === CHECK_CARD_MESSAGES.winner
       && previousStatusRef.current !== CHECK_CARD_MESSAGES.winner
     ) {
       setWinnerConfettiKey((value) => value + 1);
     }
-    previousStatusRef.current = message;
+    previousStatusRef.current = outcome.message;
 
-    persistLineHighlights(trimmedCartelaNo, nextCheckResult, priorProgress);
+    persistLineHighlights(
+      outcome.cartelaNo,
+      outcome.checkResult,
+      outcome.priorProgress,
+    );
 
-    if (isCheckCardCelebrationWin(nextCheckResult, priorMiss)) {
+    if (outcome.celebrationWin) {
       cardProgressRef.current = null;
       return;
     }
 
     const nextSnapshot = snapshotCheckCardProgress(
-      trimmedCartelaNo,
-      nextCheckResult,
-      callCount,
-      priorProgress,
+      outcome.cartelaNo,
+      outcome.checkResult,
+      outcome.callCount,
+      outcome.priorProgress,
     );
 
     if (nextSnapshot) {
@@ -236,13 +215,10 @@ export default function CheckCardModal({
       return;
     }
 
-    if (isCheckCardExpiredMessage(nextCheckResult, priorProgress, priorMiss)) {
+    if (outcome.message === CHECK_CARD_MESSAGES.expired) {
       cardProgressRef.current = null;
     }
   }, [
-    getActiveMissState,
-    getCartelaCheckState,
-    getPriorProgress,
     isCurrentCartelaCheck,
     persistLineHighlights,
   ]);
@@ -517,27 +493,27 @@ export default function CheckCardModal({
     const mergedCalls = mergeCalledNumbers(callerCalledNumbers, backendCalls);
     const callCount = mergedCalls.length;
     const priorProgress = getPriorProgress(trimmedCartelaNo);
-    // Capture the miss snapshot once, before applyCheckOutcome persists any new
-    // miss state, so the displayed result and the played sound are derived from
-    // the exact same validation inputs.
+    const priorState = getCartelaCheckState(trimmedCartelaNo);
     const priorMissSnapshot = getActiveMissState(trimmedCartelaNo);
-    const celebrationWin = isCheckCardCelebrationWin(
-      nextCheckResult,
-      priorMissSnapshot,
-    );
-    const soundKey = celebrationWin
-      ? `${trimmedCartelaNo}:${callCount}:${checkActionId}`
-      : null;
+    const finalOutcome = buildFinalCheckOutcome({
+      cartelaNo: trimmedCartelaNo,
+      checkResult: nextCheckResult,
+      isPurchased: purchased,
+      priorProgress,
+      priorMiss: priorMissSnapshot,
+      priorState,
+      callCount,
+      checkActionId,
+      playSounds,
+    });
 
     notifyWinOpportunityPassed(nextCheckResult);
 
-    applyCheckOutcome({
-      trimmedCartelaNo,
-      nextCheckResult,
-      purchased,
-      callCount,
-      suppressCelebration: !playSounds,
-    });
+    if (playSounds) {
+      manualCheckOutcomeRef.current = finalOutcome;
+    }
+
+    applyFinalCheckOutcome(finalOutcome, { suppressCelebration: !playSounds });
 
     if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
       return;
@@ -549,24 +525,18 @@ export default function CheckCardModal({
     }
 
     if (playSounds && purchased && nextCheckResult) {
-      void playCheckCardResultSounds({
-        purchased,
-        localCheckResult: nextCheckResult,
-        priorProgress,
-        priorMiss: priorMissSnapshot,
-        soundKey: celebrationWin ? soundKey : null,
-      }).then(() => {
+      void playCheckCardOutcomeSound(finalOutcome).then(() => {
         if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
           return;
         }
 
-        if (celebrationWin) {
+        if (finalOutcome.celebrationWin) {
           recordFinalWinner({
             parsedCartelaNo,
-            nextCheckResult,
+            nextCheckResult: finalOutcome.checkResult,
             mergedCalls,
             gameData,
-            soundKey,
+            soundKey: finalOutcome.soundKey,
           });
         }
 
@@ -589,11 +559,12 @@ export default function CheckCardModal({
     callerCalledNumbers,
     effectiveClosed,
     getActiveMissState,
+    getCartelaCheckState,
     getPriorProgress,
     patternSettings,
     selectedCartelas,
     selectedCartelasProp,
-    applyCheckOutcome,
+    applyFinalCheckOutcome,
     recordFinalWinner,
     notifyWinOpportunityPassed,
     refreshBackendGameState,
@@ -712,14 +683,30 @@ export default function CheckCardModal({
         return;
       }
 
+      const lockedManualOutcome = manualCheckOutcomeRef.current;
+      if (
+        lockedManualOutcome
+        && lockedManualOutcome.cartelaNo === trimmed
+        && lockedManualOutcome.callCount === effectiveCalledNumbers.length
+        && lockedManualOutcome.playSounds === true
+      ) {
+        return;
+      }
+
+      const refreshOutcome = buildFinalCheckOutcome({
+        cartelaNo: trimmed,
+        checkResult: nextCheckResult,
+        isPurchased: purchased,
+        priorProgress: getPriorProgress(trimmed),
+        priorMiss: getActiveMissState(trimmed),
+        priorState: getCartelaCheckState(trimmed),
+        callCount: effectiveCalledNumbers.length,
+        playSounds: false,
+      });
+
       notifyWinOpportunityPassed(nextCheckResult);
 
-      applyCheckOutcome({
-        trimmedCartelaNo: trimmed,
-        nextCheckResult,
-        purchased,
-        callCount: effectiveCalledNumbers.length,
-      });
+      applyFinalCheckOutcome(refreshOutcome, { suppressCelebration: true });
     };
 
     refreshStatus();
@@ -738,7 +725,10 @@ export default function CheckCardModal({
     callerCalledNumbers,
     backendCalledNumbers,
     effectiveClosed,
-    applyCheckOutcome,
+    applyFinalCheckOutcome,
+    getActiveMissState,
+    getCartelaCheckState,
+    getPriorProgress,
     notifyWinOpportunityPassed,
     isCurrentCartelaCheck,
     winProgressionActive,

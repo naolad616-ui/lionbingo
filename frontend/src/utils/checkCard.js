@@ -265,6 +265,44 @@ export function isCheckCardMissedWin(checkResult, priorState = null) {
   return checkResult.valid !== true && checkResult.progress !== true;
 }
 
+function getMissRecoveryBaseline(missedClaim = null) {
+  return Number(
+    missedClaim?.linesAtLastEvaluation
+    ?? missedClaim?.completedLinesAtMiss
+    ?? missedClaim?.completedLines
+    ?? 0,
+  );
+}
+
+function isMissedOpportunityResult(checkResult, priorState = null, recoveryWin = false) {
+  if (recoveryWin || !checkResult || isFinalCheckCardWin(checkResult)) {
+    return false;
+  }
+
+  const requiredLines = resolveClosedValue(
+    priorState?.requiredLines,
+    checkResult?.requiredLines,
+    checkResult?.closed,
+  );
+  const completedLines = Number(checkResult.completedLines ?? 0);
+
+  if (completedLines < requiredLines) {
+    return false;
+  }
+
+  if (!priorState?.missedWinActive) {
+    return isCheckCardMissedWin(checkResult, priorState);
+  }
+
+  const baseline = getMissRecoveryBaseline(priorState);
+
+  if (completedLines < baseline + 1) {
+    return false;
+  }
+
+  return completedLines > baseline;
+}
+
 export function accumulateCartelaLineHighlights(
   priorState = null,
   checkResult = null,
@@ -276,13 +314,16 @@ export function accumulateCartelaLineHighlights(
     checkResult?.requiredLines,
     checkResult?.closed,
   );
+  const recoveryWin = priorState?.missedWinActive === true
+    && isRecoveryWinAfterMiss(checkResult, priorState);
   const confirmedWin = priorState?.confirmedWin === true
-    || isFinalCheckCardWin(checkResult);
+    || isFinalCheckCardWin(checkResult)
+    || recoveryWin;
   const missedWinActive = confirmedWin
     ? false
     : (
       priorState?.missedWinActive === true
-      || isCheckCardMissedWin(checkResult)
+      || isCheckCardMissedWin(checkResult, priorState)
     );
 
   return {
@@ -301,7 +342,9 @@ export function accumulateCartelaLineHighlights(
       Number(priorState?.completedLinesAtMiss ?? 0),
       missedWinActive ? completedLines : 0,
     ),
-    linesAtLastEvaluation: completedLines,
+    linesAtLastEvaluation: isMissedOpportunityResult(checkResult, priorState, recoveryWin)
+      ? completedLines
+      : getMissRecoveryBaseline(priorState),
     missedWinActive,
     confirmedWin,
   };
@@ -471,11 +514,19 @@ export function updateMissedClaimEvaluation(missedClaim, checkResult) {
     return missedClaim;
   }
 
+  const recoveryWin = isRecoveryWinAfterMiss(checkResult, missedClaim);
+  const shouldAdvanceBaseline = isMissedOpportunityResult(
+    checkResult,
+    missedClaim,
+    recoveryWin,
+  );
   const currentLines = Number(checkResult.completedLines ?? missedClaim.linesAtLastEvaluation ?? 0);
 
   return {
     ...missedClaim,
-    linesAtLastEvaluation: currentLines,
+    linesAtLastEvaluation: shouldAdvanceBaseline
+      ? currentLines
+      : getMissRecoveryBaseline(missedClaim),
     winningCells: mergeWinningCells(
       missedClaim.winningCells ?? [],
       checkResult.winningCells ?? [],
@@ -527,36 +578,151 @@ export function isFinalCheckCardWin(checkResult) {
 }
 
 export function isRecoveryWinAfterMiss(checkResult, missedClaim = null) {
-  if (!missedClaim || !checkResult) {
+  if (!missedClaim?.missedWinActive || !checkResult) {
     return false;
   }
 
-  const missedLines = Number(
-    missedClaim.completedLinesAtMiss ?? missedClaim.completedLines ?? 0,
-  );
   const requiredLines = resolveClosedValue(
     missedClaim.requiredLines,
     checkResult.requiredLines,
     checkResult.closed,
   );
+  const firstMissLines = Number(
+    missedClaim.completedLinesAtMiss ?? missedClaim.completedLines ?? 0,
+  );
+  const recoveryBaseline = getMissRecoveryBaseline(missedClaim);
   const currentLines = Number(checkResult.completedLines ?? 0);
 
   if (requiredLines <= 0) {
     return false;
   }
 
-  // A genuine miss means the required lines were already reached earlier.
-  if (missedLines < requiredLines) {
+  // The original pattern must have been satisfied before the first miss.
+  if (firstMissLines < requiredLines) {
     return false;
   }
 
-  // Recalculate the current total completed lines against the required lines.
-  // A single ball can complete two or more lines at once, so never assume the
-  // total only advances by one after the miss.
-  return currentLines >= requiredLines;
+  // After each missed opportunity, recovery requires one newly completed valid
+  // line beyond the most recent missed-opportunity baseline.
+  return currentLines >= recoveryBaseline + 1;
 }
 
 export function isCheckCardCelebrationWin(checkResult, missedClaim = null) {
   return isFinalCheckCardWin(checkResult)
     || isRecoveryWinAfterMiss(checkResult, missedClaim);
+}
+
+function cloneCheckSnapshot(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  return Object.freeze({ ...value });
+}
+
+/**
+ * Derive the sound action from the same resolved message used for display.
+ * This guarantees text and audio can never classify the result differently.
+ */
+export function resolveCheckCardSoundAction({
+  message,
+  checkResult,
+  isPurchased,
+  priorProgress = null,
+  priorMiss = null,
+}) {
+  if (!isPurchased || !checkResult) {
+    return 'skipped';
+  }
+
+  if (message === CHECK_CARD_MESSAGES.winner) {
+    return 'win';
+  }
+
+  if (message === CHECK_CARD_MESSAGES.expired) {
+    return 'not-win';
+  }
+
+  if (message === CHECK_CARD_MESSAGES.notWinner) {
+    if (!isCheckCardNotWinResult(checkResult, priorProgress, priorMiss)) {
+      return 'silent';
+    }
+
+    return 'not-win';
+  }
+
+  return 'skipped';
+}
+
+/**
+ * Build one immutable final outcome from a single validation snapshot.
+ * Display and sound must both consume this object verbatim.
+ */
+export function buildFinalCheckOutcome({
+  cartelaNo,
+  cartFound = true,
+  checkResult,
+  isPurchased,
+  priorProgress = null,
+  priorMiss = null,
+  priorState = null,
+  callCount = 0,
+  checkActionId = null,
+  playSounds = true,
+}) {
+  const trimmedCartelaNo = String(cartelaNo ?? '').trim();
+  const frozenPriorProgress = cloneCheckSnapshot(priorProgress);
+  const frozenPriorMiss = cloneCheckSnapshot(priorMiss);
+  const frozenPriorState = cloneCheckSnapshot(priorState);
+  const frozenCheckResult = cloneCheckSnapshot(checkResult);
+
+  const message = resolveCheckCardMessage({
+    cartFound,
+    checkResult: frozenCheckResult,
+    isPurchased,
+    priorProgress: frozenPriorProgress,
+    priorMiss: frozenPriorMiss,
+  });
+
+  const winningCells = resolveCheckCardWinningCells(
+    frozenCheckResult,
+    isPurchased,
+    frozenPriorState,
+    frozenPriorProgress,
+    frozenPriorMiss,
+  );
+
+  const celebrationWin = message === CHECK_CARD_MESSAGES.winner;
+  const soundAction = playSounds
+    ? resolveCheckCardSoundAction({
+      message,
+      checkResult: frozenCheckResult,
+      isPurchased,
+      priorProgress: frozenPriorProgress,
+      priorMiss: frozenPriorMiss,
+    })
+    : 'skipped';
+
+  const soundKey = celebrationWin && checkActionId != null
+    ? `${trimmedCartelaNo}:${callCount}:${checkActionId}`
+    : null;
+
+  return Object.freeze({
+    cartelaNo: trimmedCartelaNo,
+    cartFound,
+    checkResult: frozenCheckResult,
+    isPurchased,
+    priorProgress: frozenPriorProgress,
+    priorMiss: frozenPriorMiss,
+    priorState: frozenPriorState,
+    message,
+    winningCells: Object.freeze([...winningCells]),
+    celebrationWin,
+    soundAction,
+    soundKey,
+    callCount,
+    checkActionId,
+    playSounds,
+    outcomeId: `${trimmedCartelaNo}:${callCount}:${checkActionId ?? 'refresh'}`,
+  });
 }

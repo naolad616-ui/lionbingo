@@ -1,9 +1,3 @@
-import {
-  isCheckCardCelebrationWin,
-  isCheckCardMissedWin,
-  isCheckCardNotWinResult,
-} from './checkCard';
-
 const SOUNDS_BASE_PATH = '/sounds';
 const HAVE_CURRENT_DATA = 2;
 const LOAD_TIMEOUT_MS = 8000;
@@ -612,34 +606,25 @@ export async function playWinThenPauseSounds() {
   return playPauseSound();
 }
 
-export async function playCheckCardResultSounds({
-  purchased,
-  localCheckResult,
-  priorProgress = null,
-  priorMiss = null,
-  soundKey = null,
-}) {
-  console.log('[check-card-sound] Evaluating check-card sound playback', {
-    purchased,
-    localCheckResult,
-    soundKey,
-  });
-
-  if (!purchased || !localCheckResult) {
-    console.log('[check-card-sound] Skipping sound — cartela not purchased or validation did not run');
+export async function playCheckCardOutcomeSound(outcome) {
+  if (!outcome) {
     return 'skipped';
   }
 
-  const celebrationWin = isCheckCardCelebrationWin(localCheckResult, priorMiss);
+  console.log('[check-card-sound] Playing final outcome sound', {
+    cartelaNo: outcome.cartelaNo,
+    message: outcome.message,
+    soundAction: outcome.soundAction,
+    outcomeId: outcome.outcomeId,
+  });
 
-  if (celebrationWin) {
-    if (soundKey && soundKey === lastCheckCardWinSoundKey) {
-      console.log('[check-card-sound] Skipping duplicate win sound for', soundKey);
-      return 'win-skipped';
-    }
+  if (outcome.soundAction === 'skipped' || outcome.soundAction === 'silent') {
+    return outcome.soundAction;
+  }
 
-    if (soundKey) {
-      lastCheckCardWinSoundKey = soundKey;
+  if (outcome.soundAction === 'win') {
+    if (outcome.soundKey) {
+      lastCheckCardWinSoundKey = outcome.soundKey;
     }
 
     await playCheckCardWinSound();
@@ -647,27 +632,18 @@ export async function playCheckCardResultSounds({
     return 'win';
   }
 
-  const missedWin = isCheckCardMissedWin(localCheckResult, priorMiss);
-
-  if (missedWin) {
-    console.log('[check-card-sound] Validation result: Missed win (passed)');
-    const played = await playNotWinSound();
-    console.log('[check-card-sound] not-win.mp3 playback', played ? 'succeeded' : 'failed');
-    return played ? 'missed-win' : 'missed-win-failed';
-  }
-
-  if (!isCheckCardNotWinResult(localCheckResult, priorProgress, priorMiss)) {
-    console.log('[check-card-sound] Skipping sound — expired or non-playable result', {
-      reason: localCheckResult.reason ?? null,
-      expired: localCheckResult.expired ?? false,
-      progress: localCheckResult.progress ?? false,
-    });
-    return 'silent';
-  }
-
   const played = await playNotWinSound();
   console.log('[check-card-sound] not-win.mp3 playback', played ? 'succeeded' : 'failed');
   return played ? 'not-win' : 'not-win-failed';
+}
+
+export async function playCheckCardResultSounds({ finalOutcome = null } = {}) {
+  if (!finalOutcome) {
+    console.warn('[check-card-sound] playCheckCardResultSounds requires finalOutcome');
+    return 'skipped';
+  }
+
+  return playCheckCardOutcomeSound(finalOutcome);
 }
 
 export function stopGameSounds() {
