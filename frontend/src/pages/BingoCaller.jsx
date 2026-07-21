@@ -12,19 +12,12 @@ import {
   preloadGameSounds,
   stopGameSounds,
 } from '../utils/gameSound';
-import {
-  finalizeOutstandingBoardAnnouncements,
-  markBallPublishedToBoard,
-  resetBoardPublicationRegistry,
-  syncBoardRegistryFromCalledNumbers,
-} from '../utils/callerDrawState';
 import { clearCartelaCache, preloadCartelas } from '../utils/cartelaCache';
 import {
   cacheGamePatterns,
   clearGameSessionCache,
   warmGameSessionCache,
 } from '../utils/gameSessionCache';
-import { subscribeToCallerConnectionHealth } from '../utils/callerRecovery';
 import getSocket from '../services/socket';
 import {
   fetchPatternSettings,
@@ -90,10 +83,7 @@ export default function BingoCaller() {
   const navigate = useNavigate();
   const betAmount = resolveBetAmount(location.state?.betAmount, readStoredBetAmount());
   const cardsSold = location.state?.cardsSold ?? 0;
-  const selectedCartelas = useMemo(
-    () => location.state?.selectedCartelas ?? [],
-    [location.state?.selectedCartelas],
-  );
+  const selectedCartelas = location.state?.selectedCartelas ?? [];
   const closed = useMemo(
     () => resolveClosedValue(location.state?.closed, readStoredClosedValue()),
     [location.state?.closed],
@@ -116,117 +106,36 @@ export default function BingoCaller() {
   const [shuffleSessionKey, setShuffleSessionKey] = useState(0);
 
   const drawIndexRef = useRef(0);
-  const drawTimerRef = useRef(null);
-  const schedulerGenerationRef = useRef(0);
-  const calledNumbersRef = useRef([]);
+  const intervalRef = useRef(null);
+  const previousCalledCountRef = useRef(0);
   const callIntervalMsRef = useRef(DEFAULT_CALL_INTERVAL_MS);
   const isRunningRef = useRef(false);
   const isPausedRef = useRef(false);
   const shuffleHideTimerRef = useRef(null);
-  const drawOrderRef = useRef(drawOrder);
 
   const currentCall = calledNumbers.length > 0 ? calledNumbers[calledNumbers.length - 1] : null;
   const currentLetter = currentCall ? getBingoLetter(currentCall) : null;
   const currentRangeKey = currentCall ? getBingoRangeKey(currentCall) : null;
 
-  useEffect(() => {
-    drawOrderRef.current = drawOrder;
-  }, [drawOrder]);
-
-  useEffect(() => {
-    calledNumbersRef.current = calledNumbers;
-  }, [calledNumbers]);
-
-  const clearDrawTimer = useCallback(() => {
-    if (drawTimerRef.current) {
-      window.clearTimeout(drawTimerRef.current);
-      drawTimerRef.current = null;
+  const clearIntervalTimer = useCallback(() => {
+    if (intervalRef.current) {
+      window.clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
   }, []);
 
-  const invalidateScheduler = useCallback(() => {
-    schedulerGenerationRef.current += 1;
-    clearDrawTimer();
-  }, [clearDrawTimer]);
+  const drawNext = useCallback(() => {
+    if (drawIndexRef.current >= drawOrder.length) {
+      clearIntervalTimer();
+      setIsRunning(false);
+      setIsPaused(false);
+      return;
+    }
 
-
-  const publishBallToBoard = useCallback((nextNumber) => {
-    markBallPublishedToBoard(nextNumber);
-    const nextCalled = [...calledNumbersRef.current, nextNumber];
-    calledNumbersRef.current = nextCalled;
-    setCalledNumbers(nextCalled);
-    return nextNumber;
-  }, []);
-
-  // Fully local, self-scheduling draw loop. Draws, board updates and audio all
-  // run from in-memory caches, so an already-started game continues without the
-  // network. Each start captures a fixed generation; pause/resume/interval
-  // changes bump the generation and abandon stale timers/callbacks.
-  const startDrawScheduler = useCallback(
-    ({ immediate = false } = {}) => {
-      if (!isRunningRef.current || isPausedRef.current) {
-        return;
-      }
-
-      invalidateScheduler();
-      const generation = schedulerGenerationRef.current;
-
-      const scheduleNext = () => {
-        clearDrawTimer();
-        drawTimerRef.current = window.setTimeout(() => {
-          drawTimerRef.current = null;
-          void runCycle();
-        }, callIntervalMsRef.current);
-      };
-
-      const runCycle = async () => {
-        if (generation !== schedulerGenerationRef.current) {
-          return;
-        }
-
-        if (!isRunningRef.current || isPausedRef.current) {
-          return;
-        }
-
-        finalizeOutstandingBoardAnnouncements(calledNumbersRef.current);
-
-        const order = drawOrderRef.current;
-        if (drawIndexRef.current >= order.length) {
-          invalidateScheduler();
-          setIsRunning(false);
-          setIsPaused(false);
-          return;
-        }
-
-        const nextNumber = order[drawIndexRef.current];
-        drawIndexRef.current += 1;
-        publishBallToBoard(nextNumber);
-
-        if (generation !== schedulerGenerationRef.current) {
-          return;
-        }
-
-        await playBallSound(nextNumber);
-
-        if (generation !== schedulerGenerationRef.current) {
-          return;
-        }
-
-        if (!isRunningRef.current || isPausedRef.current) {
-          return;
-        }
-
-        scheduleNext();
-      };
-
-      if (immediate) {
-        void runCycle();
-      } else {
-        scheduleNext();
-      }
-    },
-    [clearDrawTimer, invalidateScheduler, publishBallToBoard],
-  );
+    const nextNumber = drawOrder[drawIndexRef.current];
+    drawIndexRef.current += 1;
+    setCalledNumbers((current) => [...current, nextNumber]);
+  }, [clearIntervalTimer, drawOrder]);
 
   const refreshCallInterval = useCallback(async () => {
     const result = await fetchSoundSettings();
@@ -236,28 +145,29 @@ export default function BingoCaller() {
     return callIntervalMsRef.current;
   }, []);
 
-  const applyCallInterval = useCallback((intervalMs) => {
-    const parsed = Number(intervalMs);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      return;
-    }
+  const applyCallInterval = useCallback(
+    (intervalMs) => {
+      const parsed = Number(intervalMs);
+      if (!Number.isFinite(parsed) || parsed <= 0) return;
 
-    callIntervalMsRef.current = parsed;
-  }, []);
+      const previous = callIntervalMsRef.current;
+      callIntervalMsRef.current = parsed;
+
+      if (isRunningRef.current && !isPausedRef.current && parsed !== previous) {
+        clearIntervalTimer();
+        intervalRef.current = window.setInterval(drawNext, parsed);
+      }
+    },
+    [clearIntervalTimer, drawNext],
+  );
 
   const startCalling = useCallback(async () => {
-    if (drawIndexRef.current >= drawOrderRef.current.length) {
-      return;
-    }
+    if (drawIndexRef.current >= drawOrder.length) return;
 
-    // Cache everything the running game needs into browser memory before the
-    // first ball, so the game can continue fully offline until Reset/refresh:
-    // sounds (as in-memory Blob URLs / AudioBuffers), cartela grids, patterns.
+    // Cache every selected cartela before balls are drawn so offline CHECK
+    // works for all of them without a prior online check.
     warmGameSessionCache({ selectedCartelas });
-    await Promise.all([
-      preloadGameSounds(),
-      preloadCartelas(selectedCartelas),
-    ]);
+    await preloadCartelas(selectedCartelas);
 
     const lockResult = await lockGamePrize({ betAmount, cardsSold, selectedCartelas, closed });
     if (lockResult.ok && lockResult.state?.patterns) {
@@ -266,25 +176,25 @@ export default function BingoCaller() {
 
     await refreshCallInterval();
 
-    if (calledNumbersRef.current.length === 0 && drawIndexRef.current === 0) {
-      resetBoardPublicationRegistry();
-    } else {
-      syncBoardRegistryFromCalledNumbers(calledNumbersRef.current);
-    }
-
-    invalidateScheduler();
+    clearIntervalTimer();
     setIsRunning(true);
     setIsPaused(false);
 
-    startDrawScheduler({ immediate: true });
+    if (calledNumbers.length === 0) {
+      drawNext();
+    }
+
+    intervalRef.current = window.setInterval(drawNext, callIntervalMsRef.current);
   }, [
     betAmount,
+    calledNumbers.length,
     cardsSold,
     closed,
-    invalidateScheduler,
     selectedCartelas,
+    clearIntervalTimer,
+    drawNext,
+    drawOrder.length,
     refreshCallInterval,
-    startDrawScheduler,
   ]);
 
   const pauseCalling = useCallback(() => {
@@ -292,22 +202,28 @@ export default function BingoCaller() {
       return;
     }
 
-    invalidateScheduler();
+    clearIntervalTimer();
     setIsPaused(true);
-  }, [invalidateScheduler, isRunning, isPaused]);
+  }, [clearIntervalTimer, isRunning, isPaused]);
 
   const handleStart = () => {
-    if (isRunning && !isPaused) {
-      return;
-    }
+    if (isRunning && !isPaused) return;
 
+    // Resume after Pause or Check Cartela: call the next number immediately,
+    // then continue on the normal interval (no initial wait).
     if (isPaused) {
+      clearIntervalTimer();
       setIsPaused(false);
-      syncBoardRegistryFromCalledNumbers(calledNumbersRef.current);
-      startDrawScheduler({ immediate: true });
+      drawNext();
 
-      void refreshCallInterval().then(() => {
-        // Interval updates apply to the next scheduled draw cycle.
+      const intervalMs = callIntervalMsRef.current;
+      intervalRef.current = window.setInterval(drawNext, intervalMs);
+
+      void refreshCallInterval().then((nextIntervalMs) => {
+        if (!isRunningRef.current || isPausedRef.current) return;
+        if (nextIntervalMs === intervalMs) return;
+        clearIntervalTimer();
+        intervalRef.current = window.setInterval(drawNext, nextIntervalMs);
       });
       return;
     }
@@ -351,14 +267,13 @@ export default function BingoCaller() {
     }, 4000);
 
     stopGameSounds();
-    resetBoardPublicationRegistry();
     void playShuffleSound();
 
     await shuffleGameState();
     setDrawOrder(createShuffledDraw());
     drawIndexRef.current = 0;
-    calledNumbersRef.current = [];
     setCalledNumbers([]);
+    previousCalledCountRef.current = 0;
   }, [clearShuffleHideTimer, isRunning, isShuffleActive]);
 
   const handleWinOpportunityPassed = useCallback(() => {
@@ -371,9 +286,8 @@ export default function BingoCaller() {
       calledCount: calledNumbers.length,
     };
 
-    invalidateScheduler();
+    clearIntervalTimer();
     drawIndexRef.current = 0;
-    calledNumbersRef.current = [];
     setCalledNumbers([]);
     setIsRunning(false);
     setIsPaused(false);
@@ -382,14 +296,14 @@ export default function BingoCaller() {
     setIsShuffleActive(false);
     clearShuffleHideTimer();
     setDrawOrder(createShuffledDraw());
+    previousCalledCountRef.current = 0;
     stopGameSounds();
-    resetBoardPublicationRegistry();
     clearAllMissedClaims();
     clearGameSessionCache();
     clearCartelaCache();
     await resetGameState('default', snapshot);
     navigate('/bingo', { replace: true });
-  }, [calledNumbers, clearShuffleHideTimer, invalidateScheduler, navigate]);
+  }, [calledNumbers, clearIntervalTimer, clearShuffleHideTimer, navigate]);
 
   const handleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -404,10 +318,7 @@ export default function BingoCaller() {
   }, [isRunning]);
 
   useEffect(() => {
-    isPausedRef.current = isPaused;
-  }, [isPaused]);
-
-  useEffect(() => {
+    // Warm audio + every selected cartela + patterns as soon as the caller opens.
     warmGameSessionCache({ selectedCartelas });
     void preloadGameSounds();
     void preloadCartelas(selectedCartelas);
@@ -419,24 +330,28 @@ export default function BingoCaller() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- warm once when caller opens
   }, []);
 
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
   useEffect(() => () => {
-    invalidateScheduler();
+    clearIntervalTimer();
     clearShuffleHideTimer();
-  }, [clearShuffleHideTimer, invalidateScheduler]);
+  }, [clearIntervalTimer, clearShuffleHideTimer]);
+
+  useEffect(() => {
+    if (calledNumbers.length <= previousCalledCountRef.current) {
+      previousCalledCountRef.current = calledNumbers.length;
+      return;
+    }
+
+    const latestCall = calledNumbers[calledNumbers.length - 1];
+    previousCalledCountRef.current = calledNumbers.length;
+    playBallSound(latestCall);
+  }, [calledNumbers]);
 
   useEffect(() => {
     const socket = getSocket();
-
-    // The running game is fully local; the socket is only used for live prize/
-    // settings/winner updates. On reconnect we simply re-join so those keep
-    // flowing — the draw loop and audio never depend on it.
-    const handleConnectionHealth = (healthy) => {
-      if (healthy) {
-        socket.emit('join-room', { roomId: 'default' });
-      }
-    };
-
-    const unsubHealth = subscribeToCallerConnectionHealth(handleConnectionHealth);
 
     const handleValidatedWinner = () => {
       playWinThenPauseSounds();
@@ -469,7 +384,6 @@ export default function BingoCaller() {
     refreshCallInterval();
 
     return () => {
-      unsubHealth();
       socket.off('settings:updated', handleSettingsUpdated);
       socket.off('game:state', handleGameState);
       socket.off('bingo:validated', handleValidatedWinner);

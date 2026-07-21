@@ -3,11 +3,6 @@ import {
   isCheckCardMissedWin,
   isCheckCardNotWinResult,
 } from './checkCard';
-import {
-  finalizeBallAnnouncement,
-  isBallPublishedToBoard,
-  shouldNeverAnnounceBall,
-} from './callerDrawState';
 
 const SOUNDS_BASE_PATH = '/sounds';
 const HAVE_CURRENT_DATA = 2;
@@ -78,7 +73,6 @@ class GameAudioEngine {
     this.buffers = new Map();
     this.htmlTemplates = new Map();
     this.arrayBuffers = new Map();
-    this.blobUrls = new Map();
     this.preloadPromise = null;
     this.unlocked = false;
     this.activePlaybackToken = 0;
@@ -156,36 +150,7 @@ class GameAudioEngine {
 
     const buffer = await response.arrayBuffer();
     this.arrayBuffers.set(fileName, buffer);
-    this.ensureBlobUrl(fileName, buffer);
     return buffer;
-  }
-
-  /**
-   * Build a persistent in-memory Blob URL for a sound so it can play without
-   * any further network request after preload. Idempotent per file.
-   */
-  ensureBlobUrl(fileName, arrayBuffer) {
-    const existing = this.blobUrls.get(fileName);
-    if (existing) {
-      return existing;
-    }
-
-    const source = arrayBuffer ?? this.arrayBuffers.get(fileName);
-    if (!source) {
-      return null;
-    }
-
-    try {
-      const url = URL.createObjectURL(new Blob([source], { type: 'audio/mpeg' }));
-      this.blobUrls.set(fileName, url);
-      return url;
-    } catch (error) {
-      console.warn('[game-sound] blob URL creation failed', {
-        fileName,
-        error: error instanceof Error ? error.message : error,
-      });
-      return null;
-    }
   }
 
   async decodeFile(fileName) {
@@ -214,9 +179,7 @@ class GameAudioEngine {
 
     audio = new Audio();
     audio.preload = 'auto';
-    // Prefer the in-memory Blob URL (offline-safe); fall back to network path
-    // only before the blob has been created during preload.
-    audio.src = this.blobUrls.get(fileName) ?? soundPath(fileName);
+    audio.src = soundPath(fileName);
     this.htmlTemplates.set(fileName, audio);
     return audio;
   }
@@ -603,17 +566,6 @@ export function playBallSound(number) {
     console.warn('[game-sound] invalid ball number for sound playback:', number);
     return Promise.resolve(false);
   }
-
-  if (shouldNeverAnnounceBall(ballNumber)) {
-    return Promise.resolve(true);
-  }
-
-  if (!isBallPublishedToBoard(ballNumber)) {
-    console.warn('[game-sound] refusing ball sound before board publication:', ballNumber);
-    return Promise.resolve(false);
-  }
-
-  finalizeBallAnnouncement(ballNumber);
 
   return playSoundFile(fileName, {
     logLabel: `ball=${ballNumber}`,
