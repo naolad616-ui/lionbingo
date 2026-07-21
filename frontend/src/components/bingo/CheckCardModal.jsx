@@ -103,9 +103,34 @@ export default function CheckCardModal({
   const lastCelebratedCallCountRef = useRef(0);
   const cardProgressRef = useRef(null);
   const checkActionIdRef = useRef(0);
+  const cartelaNoRef = useRef('');
   const [missedClaimRevision, setMissedClaimRevision] = useState(0);
   const [winnerConfettiKey, setWinnerConfettiKey] = useState(0);
   const previousStatusRef = useRef('');
+
+  useEffect(() => {
+    cartelaNoRef.current = cartelaNo;
+  }, [cartelaNo]);
+
+  const isCurrentCartelaCheck = useCallback((trimmedCartelaNo) => {
+    return String(trimmedCartelaNo).trim() === String(cartelaNoRef.current).trim();
+  }, []);
+
+  const invalidateInFlightChecks = useCallback(() => {
+    checkActionIdRef.current += 1;
+  }, []);
+
+  const clearTransientCheckState = useCallback(() => {
+    setStatusMessage('');
+    setCheckResult(null);
+    setDisplayWinningCells([]);
+    setNumbers(null);
+    setCardLoaded(false);
+    setIsLocked(false);
+    cardProgressRef.current = null;
+    previousStatusRef.current = '';
+    resetCheckCardSoundState();
+  }, []);
 
   const getPriorProgress = useCallback((trimmedCartelaNo) => {
     const stored = cardProgressRef.current;
@@ -157,6 +182,10 @@ export default function CheckCardModal({
     callCount,
     suppressCelebration = false,
   }) => {
+    if (!isCurrentCartelaCheck(trimmedCartelaNo)) {
+      return;
+    }
+
     const priorProgress = getPriorProgress(trimmedCartelaNo);
     const priorState = getCartelaCheckState(trimmedCartelaNo);
     const priorMiss = getActiveMissState(trimmedCartelaNo);
@@ -214,6 +243,7 @@ export default function CheckCardModal({
     getActiveMissState,
     getCartelaCheckState,
     getPriorProgress,
+    isCurrentCartelaCheck,
     persistLineHighlights,
   ]);
 
@@ -278,26 +308,19 @@ export default function CheckCardModal({
   }, []);
 
   const resetState = useCallback(() => {
+    invalidateInFlightChecks();
     setCartelaNo('');
-    setNumbers(null);
-    setStatusMessage('');
+    cartelaNoRef.current = '';
+    clearTransientCheckState();
     setIsLoading(false);
-    setIsLocked(false);
-    setCardLoaded(false);
     setBackendCalledNumbers([]);
     setSelectedCartelas([]);
-    setCheckResult(null);
-    setDisplayWinningCells([]);
     setPatternSettings(null);
     setBackendClosed(null);
     lastCelebratedCallCountRef.current = 0;
-    cardProgressRef.current = null;
-    checkActionIdRef.current = 0;
     setMissedClaimRevision(0);
     setWinnerConfettiKey(0);
-    previousStatusRef.current = '';
-    resetCheckCardSoundState();
-  }, []);
+  }, [clearTransientCheckState, invalidateInFlightChecks]);
 
   const applyBackendGameState = useCallback((state) => {
     if (Array.isArray(state?.calledNumbers)) {
@@ -354,11 +377,8 @@ export default function CheckCardModal({
     const { playSounds = true } = options;
     const parsedCartelaNo = parseCartelaNumber(trimmedCartelaNo);
     if (!parsedCartelaNo) {
-      setNumbers(null);
-      setCardLoaded(false);
-      setIsLocked(false);
+      clearTransientCheckState();
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
-      setDisplayWinningCells([]);
       return;
     }
 
@@ -428,6 +448,11 @@ export default function CheckCardModal({
       : Promise.resolve(null);
 
     const [cartelaPacket, support] = await Promise.all([cartelaPromise, supportPromise]);
+
+    if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
+      return;
+    }
+
     const cartelaResult = cartelaPacket.result;
 
     if (support) {
@@ -451,11 +476,8 @@ export default function CheckCardModal({
 
     if (!cartelaResult.ok) {
       setIsLoading(false);
-      setNumbers(null);
-      setCardLoaded(false);
-      setIsLocked(false);
+      clearTransientCheckState();
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
-      setDisplayWinningCells([]);
       return;
     }
 
@@ -517,7 +539,7 @@ export default function CheckCardModal({
       suppressCelebration: !playSounds,
     });
 
-    if (checkActionId !== checkActionIdRef.current) {
+    if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
       return;
     }
 
@@ -534,7 +556,7 @@ export default function CheckCardModal({
         priorMiss: priorMissSnapshot,
         soundKey: celebrationWin ? soundKey : null,
       }).then(() => {
-        if (checkActionId !== checkActionIdRef.current) {
+        if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
           return;
         }
 
@@ -576,6 +598,8 @@ export default function CheckCardModal({
     notifyWinOpportunityPassed,
     refreshBackendGameState,
     winProgressionActive,
+    clearTransientCheckState,
+    isCurrentCartelaCheck,
   ]);
 
   useEffect(() => {
@@ -592,6 +616,7 @@ export default function CheckCardModal({
     const restoredCartela = lockedCartelas[0] ?? null;
 
     if (restoredCartela) {
+      cartelaNoRef.current = restoredCartela;
       setCartelaNo(restoredCartela);
       const restoreActionId = checkActionIdRef.current + 1;
       checkActionIdRef.current = restoreActionId;
@@ -683,6 +708,10 @@ export default function CheckCardModal({
 
       if (cancelled) return;
 
+      if (!isCurrentCartelaCheck(trimmed)) {
+        return;
+      }
+
       notifyWinOpportunityPassed(nextCheckResult);
 
       applyCheckOutcome({
@@ -711,6 +740,7 @@ export default function CheckCardModal({
     effectiveClosed,
     applyCheckOutcome,
     notifyWinOpportunityPassed,
+    isCurrentCartelaCheck,
     winProgressionActive,
   ]);
 
@@ -733,11 +763,9 @@ export default function CheckCardModal({
   const handleAction = useCallback(async () => {
     const trimmed = cartelaNo.trim();
     if (!trimmed) {
+      invalidateInFlightChecks();
+      clearTransientCheckState();
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
-      setDisplayWinningCells([]);
-      setNumbers(null);
-      setCardLoaded(false);
-      setIsLocked(false);
       return;
     }
 
@@ -756,7 +784,7 @@ export default function CheckCardModal({
     const checkActionId = checkActionIdRef.current + 1;
     checkActionIdRef.current = checkActionId;
     await evaluateCard(trimmed, checkActionId);
-  }, [cardLoaded, cartelaNo, evaluateCard, handleLockToggle, isLocked]);
+  }, [cardLoaded, cartelaNo, clearTransientCheckState, evaluateCard, handleLockToggle, invalidateInFlightChecks, isLocked]);
 
   const handleSubmit = useCallback((event) => {
     event.preventDefault();
@@ -837,16 +865,13 @@ export default function CheckCardModal({
                         return;
                       }
 
-                      setCartelaNo(event.target.value);
+                      const nextCartelaNo = event.target.value;
+                      cartelaNoRef.current = nextCartelaNo;
+                      setCartelaNo(nextCartelaNo);
+
                       if (cardLoaded) {
-                        setCardLoaded(false);
-                        setIsLocked(false);
-                        setNumbers(null);
-                        setStatusMessage('');
-                        setCheckResult(null);
-                        setDisplayWinningCells([]);
-                        cardProgressRef.current = null;
-                        previousStatusRef.current = '';
+                        invalidateInFlightChecks();
+                        clearTransientCheckState();
                       }
                     }}
                   />
