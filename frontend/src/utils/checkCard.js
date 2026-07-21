@@ -526,21 +526,23 @@ export function isRecoveryWinAfterMiss(checkResult, missedClaim = null) {
     checkResult.closed,
   );
   const currentLines = Number(checkResult.completedLines ?? 0);
-  const linesAtLastEvaluation = Number(
-    missedClaim.linesAtLastEvaluation ?? missedLines,
-  );
 
+  if (requiredLines <= 0) {
+    return false;
+  }
+
+  // A genuine miss means the required lines were already reached earlier.
   if (missedLines < requiredLines) {
     return false;
   }
 
-  if (currentLines !== missedLines + 1) {
-    return false;
-  }
-
-  return currentLines > linesAtLastEvaluation;
+  // Recalculate the current total completed lines against the required lines.
+  // A single ball can complete two or more lines at once, so never assume the
+  // total only advances by one after the miss.
+  return currentLines >= requiredLines;
 }
 
-export function isCheckCardCelebrationWin(checkResult, _missedClaim = null) {
-  return isFinalCheckCardWin(checkResult);
+export function isCheckCardCelebrationWin(checkResult, missedClaim = null) {
+  return isFinalCheckCardWin(checkResult)
+    || isRecoveryWinAfterMiss(checkResult, missedClaim);
 }

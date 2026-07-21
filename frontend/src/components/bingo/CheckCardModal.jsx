@@ -489,9 +489,13 @@ export default function CheckCardModal({
     const mergedCalls = mergeCalledNumbers(callerCalledNumbers, backendCalls);
     const callCount = mergedCalls.length;
     const priorProgress = getPriorProgress(trimmedCartelaNo);
+    // Capture the miss snapshot once, before applyCheckOutcome persists any new
+    // miss state, so the displayed result and the played sound are derived from
+    // the exact same validation inputs.
+    const priorMissSnapshot = getActiveMissState(trimmedCartelaNo);
     const celebrationWin = isCheckCardCelebrationWin(
       nextCheckResult,
-      getActiveMissState(trimmedCartelaNo),
+      priorMissSnapshot,
     );
     const soundKey = celebrationWin
       ? `${trimmedCartelaNo}:${callCount}:${checkActionId}`
@@ -516,14 +520,12 @@ export default function CheckCardModal({
       void refreshBackendGameState();
     }
 
-    const activeMiss = getActiveMissState(trimmedCartelaNo);
-
     if (playSounds && purchased && nextCheckResult) {
       void playCheckCardResultSounds({
         purchased,
         localCheckResult: nextCheckResult,
         priorProgress,
-        priorMiss: activeMiss,
+        priorMiss: priorMissSnapshot,
         soundKey: celebrationWin ? soundKey : null,
       }).then(() => {
         if (checkActionId !== checkActionIdRef.current) {
