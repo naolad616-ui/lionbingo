@@ -487,14 +487,28 @@ export function resolveCheckCardWinningCells(
   checkResult,
   isPurchased,
   cartelaState = null,
+  priorProgress = null,
+  priorMiss = null,
 ) {
-  if (!isPurchased) {
+  if (!isPurchased || !checkResult) {
     return [];
   }
 
+  const accumulated = accumulateCartelaLineHighlights(
+    cartelaState,
+    checkResult,
+    priorProgress,
+  ).winningCells ?? [];
+
+  if (!isCheckCardCelebrationWin(checkResult, priorMiss)) {
+    return accumulated;
+  }
+
+  // Win highlights must include every completed winning line from the same
+  // validation snapshot, including multiple lines finished together.
   return mergeWinningCells(
-    cartelaState?.winningCells ?? [],
-    checkResult?.winningCells ?? [],
+    checkResult.winningCells ?? [],
+    accumulated,
   );
 }
 

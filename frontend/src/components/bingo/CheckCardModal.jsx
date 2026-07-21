@@ -97,6 +97,7 @@ export default function CheckCardModal({
   const [backendCalledNumbers, setBackendCalledNumbers] = useState([]);
   const [selectedCartelas, setSelectedCartelas] = useState([]);
   const [checkResult, setCheckResult] = useState(null);
+  const [displayWinningCells, setDisplayWinningCells] = useState([]);
   const [patternSettings, setPatternSettings] = useState(null);
   const [backendClosed, setBackendClosed] = useState(null);
   const lastCelebratedCallCountRef = useRef(0);
@@ -166,9 +167,17 @@ export default function CheckCardModal({
       priorProgress,
       priorMiss,
     });
+    const nextWinningCells = resolveCheckCardWinningCells(
+      nextCheckResult,
+      purchased,
+      priorState,
+      priorProgress,
+      priorMiss,
+    );
 
     setCheckResult(nextCheckResult);
     setStatusMessage(message);
+    setDisplayWinningCells(nextWinningCells);
 
     if (
       !suppressCelebration
@@ -238,14 +247,7 @@ export default function CheckCardModal({
     [cartelaNo, selectedCartelas, selectedCartelasProp],
   );
 
-  const winningCells = useMemo(
-    () => resolveCheckCardWinningCells(
-      checkResult,
-      isPurchased,
-      getCartelaCheckState(cartelaNo.trim()),
-    ),
-    [checkResult, cartelaNo, getCartelaCheckState, isPurchased, missedClaimRevision],
-  );
+  const winningCells = displayWinningCells;
 
   const recordFinalWinner = useCallback(({
     parsedCartelaNo,
@@ -285,6 +287,7 @@ export default function CheckCardModal({
     setBackendCalledNumbers([]);
     setSelectedCartelas([]);
     setCheckResult(null);
+    setDisplayWinningCells([]);
     setPatternSettings(null);
     setBackendClosed(null);
     lastCelebratedCallCountRef.current = 0;
@@ -355,11 +358,13 @@ export default function CheckCardModal({
       setCardLoaded(false);
       setIsLocked(false);
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
+      setDisplayWinningCells([]);
       return;
     }
 
     setIsLoading(true);
     setStatusMessage('');
+    setDisplayWinningCells([]);
 
     const profileStarted = performance.now();
     const mark = (name, startedAt = profileStarted) => ({
@@ -450,6 +455,7 @@ export default function CheckCardModal({
       setCardLoaded(false);
       setIsLocked(false);
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
+      setDisplayWinningCells([]);
       return;
     }
 
@@ -728,6 +734,7 @@ export default function CheckCardModal({
     const trimmed = cartelaNo.trim();
     if (!trimmed) {
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
+      setDisplayWinningCells([]);
       setNumbers(null);
       setCardLoaded(false);
       setIsLocked(false);
@@ -837,6 +844,7 @@ export default function CheckCardModal({
                         setNumbers(null);
                         setStatusMessage('');
                         setCheckResult(null);
+                        setDisplayWinningCells([]);
                         cardProgressRef.current = null;
                         previousStatusRef.current = '';
                       }
