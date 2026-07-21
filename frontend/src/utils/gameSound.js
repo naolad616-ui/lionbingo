@@ -3,6 +3,11 @@ import {
   isCheckCardMissedWin,
   isCheckCardNotWinResult,
 } from './checkCard';
+import {
+  finalizeBallAnnouncement,
+  isBallPublishedToBoard,
+  shouldNeverAnnounceBall,
+} from './callerDrawState';
 
 const SOUNDS_BASE_PATH = '/sounds';
 const HAVE_CURRENT_DATA = 2;
@@ -566,6 +571,17 @@ export function playBallSound(number) {
     console.warn('[game-sound] invalid ball number for sound playback:', number);
     return Promise.resolve(false);
   }
+
+  if (shouldNeverAnnounceBall(ballNumber)) {
+    return Promise.resolve(true);
+  }
+
+  if (!isBallPublishedToBoard(ballNumber)) {
+    console.warn('[game-sound] refusing ball sound before board publication:', ballNumber);
+    return Promise.resolve(false);
+  }
+
+  finalizeBallAnnouncement(ballNumber);
 
   return playSoundFile(fileName, {
     logLabel: `ball=${ballNumber}`,

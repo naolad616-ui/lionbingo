@@ -12,12 +12,22 @@ import {
   preloadGameSounds,
   stopGameSounds,
 } from '../utils/gameSound';
+import {
+  finalizeOutstandingBoardAnnouncements,
+  markBallPublishedToBoard,
+  resetBoardPublicationRegistry,
+  syncBoardRegistryFromCalledNumbers,
+} from '../utils/callerDrawState';
 import { clearCartelaCache, preloadCartelas } from '../utils/cartelaCache';
 import {
   cacheGamePatterns,
   clearGameSessionCache,
   warmGameSessionCache,
 } from '../utils/gameSessionCache';
+import {
+  isCallerConnectionHealthy,
+  subscribeToCallerConnectionHealth,
+} from '../utils/callerRecovery';
 import getSocket from '../services/socket';
 import {
   fetchPatternSettings,
@@ -106,36 +116,169 @@ export default function BingoCaller() {
   const [shuffleSessionKey, setShuffleSessionKey] = useState(0);
 
   const drawIndexRef = useRef(0);
-  const intervalRef = useRef(null);
-  const previousCalledCountRef = useRef(0);
+  const drawTimerRef = useRef(null);
+  const schedulerGenerationRef = useRef(0);
+  const calledNumbersRef = useRef([]);
   const callIntervalMsRef = useRef(DEFAULT_CALL_INTERVAL_MS);
   const isRunningRef = useRef(false);
   const isPausedRef = useRef(false);
+  const isOutageFrozenRef = useRef(false);
+  const wasRunningBeforeOutageRef = useRef(false);
   const shuffleHideTimerRef = useRef(null);
+  const drawOrderRef = useRef(drawOrder);
 
   const currentCall = calledNumbers.length > 0 ? calledNumbers[calledNumbers.length - 1] : null;
   const currentLetter = currentCall ? getBingoLetter(currentCall) : null;
   const currentRangeKey = currentCall ? getBingoRangeKey(currentCall) : null;
 
-  const clearIntervalTimer = useCallback(() => {
-    if (intervalRef.current) {
-      window.clearInterval(intervalRef.current);
-      intervalRef.current = null;
+  useEffect(() => {
+    drawOrderRef.current = drawOrder;
+  }, [drawOrder]);
+
+  useEffect(() => {
+    calledNumbersRef.current = calledNumbers;
+  }, [calledNumbers]);
+
+  const clearDrawTimer = useCallback(() => {
+    if (drawTimerRef.current) {
+      window.clearTimeout(drawTimerRef.current);
+      drawTimerRef.current = null;
     }
   }, []);
 
-  const drawNext = useCallback(() => {
-    if (drawIndexRef.current >= drawOrder.length) {
-      clearIntervalTimer();
+  const invalidateScheduler = useCallback(() => {
+    schedulerGenerationRef.current += 1;
+    clearDrawTimer();
+  }, [clearDrawTimer]);
+
+
+  const publishBallToBoard = useCallback((nextNumber) => {
+    markBallPublishedToBoard(nextNumber);
+    const nextCalled = [...calledNumbersRef.current, nextNumber];
+    calledNumbersRef.current = nextCalled;
+    setCalledNumbers(nextCalled);
+    return nextNumber;
+  }, []);
+
+  const freezeForOutage = useCallback(() => {
+    if (isOutageFrozenRef.current) {
+      return;
+    }
+
+    if (!isRunningRef.current || isPausedRef.current) {
+      return;
+    }
+
+    isOutageFrozenRef.current = true;
+    wasRunningBeforeOutageRef.current = true;
+    invalidateScheduler();
+  }, [invalidateScheduler]);
+
+  const scheduleDrawCycle = useCallback(
+    (delayMs) => {
+      clearDrawTimer();
+      const generation = schedulerGenerationRef.current;
+
+      drawTimerRef.current = window.setTimeout(() => {
+        drawTimerRef.current = null;
+        void runDrawCycleRef.current?.(generation);
+      }, delayMs);
+    },
+    [clearDrawTimer],
+  );
+
+  const runDrawCycleRef = useRef(null);
+
+  const startDrawScheduler = useCallback(
+    ({ immediate = false } = {}) => {
+      if (!isRunningRef.current || isPausedRef.current || isOutageFrozenRef.current) {
+        return;
+      }
+
+      if (!isCallerConnectionHealthy()) {
+        freezeForOutage();
+        return;
+      }
+
+      invalidateScheduler();
+
+      if (immediate) {
+        const generation = schedulerGenerationRef.current;
+        void runDrawCycleRef.current?.(generation);
+        return;
+      }
+
+      scheduleDrawCycle(callIntervalMsRef.current);
+    },
+    [freezeForOutage, invalidateScheduler, scheduleDrawCycle],
+  );
+
+  const resumeAfterOutage = useCallback(() => {
+    if (!isOutageFrozenRef.current || !isCallerConnectionHealthy()) {
+      return;
+    }
+
+    isOutageFrozenRef.current = false;
+
+    if (!wasRunningBeforeOutageRef.current || !isRunningRef.current || isPausedRef.current) {
+      wasRunningBeforeOutageRef.current = false;
+      return;
+    }
+
+    wasRunningBeforeOutageRef.current = false;
+    startDrawScheduler({ immediate: true });
+  }, [startDrawScheduler]);
+
+  runDrawCycleRef.current = async (generation) => {
+    if (generation !== schedulerGenerationRef.current) {
+      return;
+    }
+
+    if (!isRunningRef.current || isPausedRef.current || isOutageFrozenRef.current) {
+      return;
+    }
+
+    if (!isCallerConnectionHealthy()) {
+      freezeForOutage();
+      return;
+    }
+
+    finalizeOutstandingBoardAnnouncements(calledNumbersRef.current);
+
+    const order = drawOrderRef.current;
+    if (drawIndexRef.current >= order.length) {
+      invalidateScheduler();
       setIsRunning(false);
       setIsPaused(false);
       return;
     }
 
-    const nextNumber = drawOrder[drawIndexRef.current];
+    const nextNumber = order[drawIndexRef.current];
     drawIndexRef.current += 1;
-    setCalledNumbers((current) => [...current, nextNumber]);
-  }, [clearIntervalTimer, drawOrder]);
+    publishBallToBoard(nextNumber);
+
+    if (generation !== schedulerGenerationRef.current) {
+      return;
+    }
+
+    if (!isCallerConnectionHealthy()) {
+      freezeForOutage();
+      return;
+    }
+
+    await playBallSound(nextNumber);
+
+    if (generation !== schedulerGenerationRef.current) {
+      return;
+    }
+
+    if (!isCallerConnectionHealthy()) {
+      freezeForOutage();
+      return;
+    }
+
+    scheduleDrawCycle(callIntervalMsRef.current);
+  };
 
   const refreshCallInterval = useCallback(async () => {
     const result = await fetchSoundSettings();
@@ -145,27 +288,20 @@ export default function BingoCaller() {
     return callIntervalMsRef.current;
   }, []);
 
-  const applyCallInterval = useCallback(
-    (intervalMs) => {
-      const parsed = Number(intervalMs);
-      if (!Number.isFinite(parsed) || parsed <= 0) return;
+  const applyCallInterval = useCallback((intervalMs) => {
+    const parsed = Number(intervalMs);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return;
+    }
 
-      const previous = callIntervalMsRef.current;
-      callIntervalMsRef.current = parsed;
-
-      if (isRunningRef.current && !isPausedRef.current && parsed !== previous) {
-        clearIntervalTimer();
-        intervalRef.current = window.setInterval(drawNext, parsed);
-      }
-    },
-    [clearIntervalTimer, drawNext],
-  );
+    callIntervalMsRef.current = parsed;
+  }, []);
 
   const startCalling = useCallback(async () => {
-    if (drawIndexRef.current >= drawOrder.length) return;
+    if (drawIndexRef.current >= drawOrderRef.current.length) {
+      return;
+    }
 
-    // Cache every selected cartela before balls are drawn so offline CHECK
-    // works for all of them without a prior online check.
     warmGameSessionCache({ selectedCartelas });
     await preloadCartelas(selectedCartelas);
 
@@ -176,25 +312,27 @@ export default function BingoCaller() {
 
     await refreshCallInterval();
 
-    clearIntervalTimer();
-    setIsRunning(true);
-    setIsPaused(false);
-
-    if (calledNumbers.length === 0) {
-      drawNext();
+    if (calledNumbersRef.current.length === 0 && drawIndexRef.current === 0) {
+      resetBoardPublicationRegistry();
+    } else {
+      syncBoardRegistryFromCalledNumbers(calledNumbersRef.current);
     }
 
-    intervalRef.current = window.setInterval(drawNext, callIntervalMsRef.current);
+    invalidateScheduler();
+    setIsRunning(true);
+    setIsPaused(false);
+    isOutageFrozenRef.current = false;
+    wasRunningBeforeOutageRef.current = false;
+
+    startDrawScheduler({ immediate: true });
   }, [
     betAmount,
-    calledNumbers.length,
     cardsSold,
     closed,
+    invalidateScheduler,
     selectedCartelas,
-    clearIntervalTimer,
-    drawNext,
-    drawOrder.length,
     refreshCallInterval,
+    startDrawScheduler,
   ]);
 
   const pauseCalling = useCallback(() => {
@@ -202,28 +340,24 @@ export default function BingoCaller() {
       return;
     }
 
-    clearIntervalTimer();
+    invalidateScheduler();
     setIsPaused(true);
-  }, [clearIntervalTimer, isRunning, isPaused]);
+  }, [invalidateScheduler, isRunning, isPaused]);
 
   const handleStart = () => {
-    if (isRunning && !isPaused) return;
+    if (isRunning && !isPaused) {
+      return;
+    }
 
-    // Resume after Pause or Check Cartela: call the next number immediately,
-    // then continue on the normal interval (no initial wait).
     if (isPaused) {
-      clearIntervalTimer();
       setIsPaused(false);
-      drawNext();
+      isOutageFrozenRef.current = false;
+      wasRunningBeforeOutageRef.current = false;
+      syncBoardRegistryFromCalledNumbers(calledNumbersRef.current);
+      startDrawScheduler({ immediate: true });
 
-      const intervalMs = callIntervalMsRef.current;
-      intervalRef.current = window.setInterval(drawNext, intervalMs);
-
-      void refreshCallInterval().then((nextIntervalMs) => {
-        if (!isRunningRef.current || isPausedRef.current) return;
-        if (nextIntervalMs === intervalMs) return;
-        clearIntervalTimer();
-        intervalRef.current = window.setInterval(drawNext, nextIntervalMs);
+      void refreshCallInterval().then(() => {
+        // Interval updates apply to the next scheduled draw cycle.
       });
       return;
     }
@@ -267,13 +401,16 @@ export default function BingoCaller() {
     }, 4000);
 
     stopGameSounds();
+    resetBoardPublicationRegistry();
     void playShuffleSound();
 
     await shuffleGameState();
     setDrawOrder(createShuffledDraw());
     drawIndexRef.current = 0;
+    calledNumbersRef.current = [];
     setCalledNumbers([]);
-    previousCalledCountRef.current = 0;
+    isOutageFrozenRef.current = false;
+    wasRunningBeforeOutageRef.current = false;
   }, [clearShuffleHideTimer, isRunning, isShuffleActive]);
 
   const handleWinOpportunityPassed = useCallback(() => {
@@ -286,8 +423,9 @@ export default function BingoCaller() {
       calledCount: calledNumbers.length,
     };
 
-    clearIntervalTimer();
+    invalidateScheduler();
     drawIndexRef.current = 0;
+    calledNumbersRef.current = [];
     setCalledNumbers([]);
     setIsRunning(false);
     setIsPaused(false);
@@ -296,14 +434,16 @@ export default function BingoCaller() {
     setIsShuffleActive(false);
     clearShuffleHideTimer();
     setDrawOrder(createShuffledDraw());
-    previousCalledCountRef.current = 0;
+    isOutageFrozenRef.current = false;
+    wasRunningBeforeOutageRef.current = false;
     stopGameSounds();
+    resetBoardPublicationRegistry();
     clearAllMissedClaims();
     clearGameSessionCache();
     clearCartelaCache();
     await resetGameState('default', snapshot);
     navigate('/bingo', { replace: true });
-  }, [calledNumbers, clearIntervalTimer, clearShuffleHideTimer, navigate]);
+  }, [calledNumbers, clearShuffleHideTimer, invalidateScheduler, navigate]);
 
   const handleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -318,7 +458,10 @@ export default function BingoCaller() {
   }, [isRunning]);
 
   useEffect(() => {
-    // Warm audio + every selected cartela + patterns as soon as the caller opens.
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
+  useEffect(() => {
     warmGameSessionCache({ selectedCartelas });
     void preloadGameSounds();
     void preloadCartelas(selectedCartelas);
@@ -330,28 +473,25 @@ export default function BingoCaller() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- warm once when caller opens
   }, []);
 
-  useEffect(() => {
-    isPausedRef.current = isPaused;
-  }, [isPaused]);
-
   useEffect(() => () => {
-    clearIntervalTimer();
+    invalidateScheduler();
     clearShuffleHideTimer();
-  }, [clearIntervalTimer, clearShuffleHideTimer]);
-
-  useEffect(() => {
-    if (calledNumbers.length <= previousCalledCountRef.current) {
-      previousCalledCountRef.current = calledNumbers.length;
-      return;
-    }
-
-    const latestCall = calledNumbers[calledNumbers.length - 1];
-    previousCalledCountRef.current = calledNumbers.length;
-    playBallSound(latestCall);
-  }, [calledNumbers]);
+  }, [clearShuffleHideTimer, invalidateScheduler]);
 
   useEffect(() => {
     const socket = getSocket();
+
+    const handleConnectionHealth = (healthy) => {
+      if (!healthy) {
+        freezeForOutage();
+        return;
+      }
+
+      socket.emit('join-room', { roomId: 'default' });
+      resumeAfterOutage();
+    };
+
+    const unsubHealth = subscribeToCallerConnectionHealth(handleConnectionHealth);
 
     const handleValidatedWinner = () => {
       playWinThenPauseSounds();
@@ -383,12 +523,17 @@ export default function BingoCaller() {
 
     refreshCallInterval();
 
+    if (!isCallerConnectionHealthy()) {
+      freezeForOutage();
+    }
+
     return () => {
+      unsubHealth();
       socket.off('settings:updated', handleSettingsUpdated);
       socket.off('game:state', handleGameState);
       socket.off('bingo:validated', handleValidatedWinner);
     };
-  }, [applyCallInterval, refreshCallInterval]);
+  }, [applyCallInterval, freezeForOutage, refreshCallInterval, resumeAfterOutage]);
 
   const shuffleDisabled = isRunning || isShuffleActive;
   const startDisabled = isRunning && !isPaused;
