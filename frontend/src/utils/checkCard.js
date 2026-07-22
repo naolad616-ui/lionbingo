@@ -340,7 +340,12 @@ export function accumulateCartelaLineHighlights(
     && hasEverCompletedValidWinningLine(checkResult, priorState);
   const progressionUnlocked = priorState?.progressionUnlocked === true
     || missedOpportunity
-    || progressionExpired;
+    || progressionExpired
+    || (celebrationWin && (
+      checkResult?.progressionWin === true
+      || checkResult?.reason === 'progression-win'
+      || completedLines > requiredLines
+    ));
   const confirmedWin = celebrationWin;
   const missedWinActive = celebrationWin
     ? false

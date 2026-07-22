@@ -308,7 +308,13 @@ export function validateCartelaWinWithClosed({
     return buildWinResult(completedNow, linesNow, requiredLines);
   }
 
+  // Initial ዝግ window already passed on a prior ball. Any NEW valid line
+  // completed by the current ball is a recovery win opportunity.
   if (linesPrior >= requiredLines) {
+    if (newlyCompleted.length > 0) {
+      return buildProgressionWinResult(newlyCompleted, linesNow);
+    }
+
     return {
       valid: false,
       expired: true,

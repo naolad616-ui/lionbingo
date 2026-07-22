@@ -402,6 +402,45 @@ describe('missed-win recovery with real validation', () => {
     expectWinner(recovery, 'recovery without an extra CHECK press');
   });
 
+  it('awards recovery win when current ball completes a new line after linesPrior already met ዝግ', () => {
+    // Mirrors the screenshot: 2+ lines already complete before current ball,
+    // then current ball (27) finishes another valid line.
+    const grid = [
+      [15, 22, 37, 56, 65],
+      [2, 27, 41, 52, 68],
+      [7, 17, 0, 57, 67],
+      [14, 18, 36, 59, 73],
+      [11, 24, 38, 58, 63],
+    ];
+
+    // Before 27: row1 + col B + col O already complete (>= 2 ዝግ).
+    const priorCalls = [
+      15, 22, 37, 56, 65,
+      2, 41, 52, 68,
+      7, 14, 11,
+      67, 73, 63,
+    ];
+    const currentCall = 27;
+    const calledNumbers = [...priorCalls, currentCall];
+
+    const checkResult = validateWithGrid({
+      grid,
+      calledNumbers,
+      currentCall,
+      priorState: null,
+    });
+
+    assert.equal(checkResult.valid, true, 'new line on current ball must be a win after ዝግ already passed');
+    assert.ok(
+      checkResult.progressionWin === true || checkResult.reason === 'progression-win',
+      'must classify as progression/recovery win',
+    );
+
+    const result = runCheck('1', null, checkResult);
+    expectWinner(result, 'screenshot recovery: current ball new line after prior miss window');
+    assert.equal(result.nextState.progressionUnlocked, true);
+  });
+
   it('initial win at 2 completed lines via validation', () => {
     const calledNumbers = [1, 2, 3, 4, 5, 10, 20, 30, 40];
     const checkResult = validateWithGrid({
