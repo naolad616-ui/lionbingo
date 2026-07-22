@@ -145,15 +145,23 @@ export function hasEverCompletedValidWinningLine(
   checkResult,
   priorState = null,
 ) {
-  if (priorState?.confirmedWin === true) {
+  if (!checkResult || isFinalCheckCardWin(checkResult)) {
     return false;
   }
 
-  if (priorState?.missedWinActive === true) {
-    return true;
+  if (priorState?.progressionUnlocked) {
+    const baseline = getMissRecoveryBaseline(priorState);
+    const completedLines = Number(checkResult.completedLines ?? 0);
+
+    return completedLines > baseline
+      && (
+        checkResult.expired === true
+        || checkResult.reason === 'pattern-expired'
+        || checkResult.reason === 'continue-playing'
+      );
   }
 
-  return hasCompletedWinningLines(checkResult);
+  return hasCompletedWinningLines(checkResult, priorState);
 }
 
 export function getCellDisplayValue({ row, col, value, cardLoaded }) {
@@ -182,6 +190,10 @@ export function normalizeGridForValidation(numbers) {
       return Number.isFinite(parsed) ? parsed : 0;
     });
   });
+}
+
+export function isCartelaProgressionActive(cartelaState = null) {
+  return Boolean(cartelaState?.progressionUnlocked);
 }
 
 export function validateCheckCardWin({
@@ -242,24 +254,20 @@ export function isWinOpportunityPassed(checkResult, originalClosed) {
 }
 
 export function isCheckCardMissedWin(checkResult, priorState = null) {
-  if (priorState?.confirmedWin === true) {
-    return false;
-  }
-
-  if (priorState?.missedWinActive === true) {
-    return true;
-  }
-
   if (!checkResult || isFinalCheckCardWin(checkResult)) {
     return false;
   }
 
-  if (!hasCompletedWinningLines(checkResult)) {
+  if (!hasCompletedWinningLines(checkResult, priorState)) {
     return false;
   }
 
   if (checkResult.expired === true || checkResult.reason === 'pattern-expired') {
     return true;
+  }
+
+  if (priorState?.progressionUnlocked) {
+    return false;
   }
 
   return checkResult.valid !== true && checkResult.progress !== true;
@@ -285,6 +293,16 @@ function isMissedOpportunityResult(checkResult, priorState = null, recoveryWin =
     checkResult?.closed,
   );
   const completedLines = Number(checkResult.completedLines ?? 0);
+  const baseline = getMissRecoveryBaseline(priorState);
+
+  if (priorState?.progressionUnlocked) {
+    return completedLines > baseline
+      && (
+        checkResult.expired === true
+        || checkResult.reason === 'pattern-expired'
+        || checkResult.reason === 'continue-playing'
+      );
+  }
 
   if (completedLines < requiredLines) {
     return false;
@@ -293,8 +311,6 @@ function isMissedOpportunityResult(checkResult, priorState = null, recoveryWin =
   if (!priorState?.missedWinActive) {
     return isCheckCardMissedWin(checkResult, priorState);
   }
-
-  const baseline = getMissRecoveryBaseline(priorState);
 
   if (completedLines < baseline + 1) {
     return false;
@@ -314,17 +330,21 @@ export function accumulateCartelaLineHighlights(
     checkResult?.requiredLines,
     checkResult?.closed,
   );
-  const recoveryWin = priorState?.missedWinActive === true
-    && isRecoveryWinAfterMiss(checkResult, priorState);
-  const confirmedWin = priorState?.confirmedWin === true
-    || isFinalCheckCardWin(checkResult)
-    || recoveryWin;
-  const missedWinActive = confirmedWin
+  const activeMiss = priorState?.missedWinActive === true
+    ? priorState
+    : null;
+  const celebrationWin = isCheckCardCelebrationWin(checkResult, activeMiss);
+  const missedOpportunity = !celebrationWin
+    && isCheckCardMissedWin(checkResult, priorState);
+  const progressionExpired = !celebrationWin
+    && hasEverCompletedValidWinningLine(checkResult, priorState);
+  const progressionUnlocked = priorState?.progressionUnlocked === true
+    || missedOpportunity
+    || progressionExpired;
+  const confirmedWin = celebrationWin;
+  const missedWinActive = celebrationWin
     ? false
-    : (
-      priorState?.missedWinActive === true
-      || isCheckCardMissedWin(checkResult, priorState)
-    );
+    : (missedOpportunity || progressionExpired || priorState?.missedWinActive === true);
 
   return {
     cartelaNo: priorState?.cartelaNo ?? null,
@@ -340,13 +360,14 @@ export function accumulateCartelaLineHighlights(
     requiredLines,
     completedLinesAtMiss: Math.max(
       Number(priorState?.completedLinesAtMiss ?? 0),
-      missedWinActive ? completedLines : 0,
+      missedOpportunity || progressionExpired ? completedLines : 0,
     ),
-    linesAtLastEvaluation: isMissedOpportunityResult(checkResult, priorState, recoveryWin)
+    linesAtLastEvaluation: isMissedOpportunityResult(checkResult, priorState, celebrationWin)
       ? completedLines
       : getMissRecoveryBaseline(priorState),
     missedWinActive,
     confirmedWin,
+    progressionUnlocked,
   };
 }
 
@@ -439,6 +460,7 @@ export function resolveCheckCardMessage({
   isPurchased,
   priorProgress = null,
   priorMiss = null,
+  priorState = null,
 }) {
   if (!cartFound || !isPurchased) {
     return CHECK_CARD_MESSAGES.notFound;
@@ -453,8 +475,8 @@ export function resolveCheckCardMessage({
   }
 
   if (
-    isCheckCardMissedWin(checkResult, priorMiss)
-    || hasEverCompletedValidWinningLine(checkResult, priorMiss)
+    isCheckCardMissedWin(checkResult, priorState ?? priorMiss)
+    || hasEverCompletedValidWinningLine(checkResult, priorState ?? priorMiss)
   ) {
     return CHECK_CARD_MESSAGES.expired;
   }
@@ -582,6 +604,10 @@ export function isRecoveryWinAfterMiss(checkResult, missedClaim = null) {
     return false;
   }
 
+  if (!isFinalCheckCardWin(checkResult)) {
+    return false;
+  }
+
   const requiredLines = resolveClosedValue(
     missedClaim.requiredLines,
     checkResult.requiredLines,
@@ -597,19 +623,15 @@ export function isRecoveryWinAfterMiss(checkResult, missedClaim = null) {
     return false;
   }
 
-  // The original pattern must have been satisfied before the first miss.
   if (firstMissLines < requiredLines) {
     return false;
   }
 
-  // After each missed opportunity, recovery requires one newly completed valid
-  // line beyond the most recent missed-opportunity baseline.
-  return currentLines >= recoveryBaseline + 1;
+  return currentLines > recoveryBaseline;
 }
 
 export function isCheckCardCelebrationWin(checkResult, missedClaim = null) {
-  return isFinalCheckCardWin(checkResult)
-    || isRecoveryWinAfterMiss(checkResult, missedClaim);
+  return isFinalCheckCardWin(checkResult);
 }
 
 function cloneCheckSnapshot(value) {
@@ -682,6 +704,7 @@ export function buildFinalCheckOutcome({
     isPurchased,
     priorProgress: frozenPriorProgress,
     priorMiss: frozenPriorMiss,
+    priorState: frozenPriorState,
   });
 
   const winningCells = resolveCheckCardWinningCells(

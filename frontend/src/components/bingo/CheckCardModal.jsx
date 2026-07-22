@@ -12,6 +12,7 @@ import {
   CHECK_CARD_MESSAGES,
   accumulateCartelaLineHighlights,
   buildFinalCheckOutcome,
+  isCartelaProgressionActive,
   isCartelaPurchased,
   mergeCalledNumbers,
   parseCartelaNumber,
@@ -140,13 +141,17 @@ export default function CheckCardModal({
     return stored;
   }, []);
 
+  const getCartelaProgressionActive = useCallback((trimmedCartelaNo) => {
+    return isCartelaProgressionActive(readCartelaCheckState(trimmedCartelaNo));
+  }, []);
+
   const getCartelaCheckState = useCallback((trimmedCartelaNo) => {
     return readCartelaCheckState(trimmedCartelaNo);
   }, []);
 
   const getActiveMissState = useCallback((trimmedCartelaNo) => {
     const state = readCartelaCheckState(trimmedCartelaNo);
-    if (!state?.missedWinActive || state.confirmedWin) {
+    if (!state?.missedWinActive) {
       return null;
     }
 
@@ -461,6 +466,11 @@ export default function CheckCardModal({
     let nextCheckResult = null;
 
     const validationStarted = performance.now();
+    const priorProgress = getPriorProgress(trimmedCartelaNo);
+    const priorState = getCartelaCheckState(trimmedCartelaNo);
+    const priorMissSnapshot = getActiveMissState(trimmedCartelaNo);
+    const progressionActive = getCartelaProgressionActive(trimmedCartelaNo);
+
     if (purchased && activePatterns) {
       nextCheckResult = runCheckCardValidation({
         numbers: cartelaResult.data.numbers,
@@ -468,7 +478,7 @@ export default function CheckCardModal({
         backendCalledNumbers: backendCalls,
         patternSettings: activePatterns,
         closed: effectiveClosed,
-        progressionActive: winProgressionActive,
+        progressionActive,
       });
     }
     const validationMs = performance.now() - validationStarted;
@@ -492,9 +502,6 @@ export default function CheckCardModal({
     }));
     const mergedCalls = mergeCalledNumbers(callerCalledNumbers, backendCalls);
     const callCount = mergedCalls.length;
-    const priorProgress = getPriorProgress(trimmedCartelaNo);
-    const priorState = getCartelaCheckState(trimmedCartelaNo);
-    const priorMissSnapshot = getActiveMissState(trimmedCartelaNo);
     const finalOutcome = buildFinalCheckOutcome({
       cartelaNo: trimmedCartelaNo,
       checkResult: nextCheckResult,
@@ -560,6 +567,7 @@ export default function CheckCardModal({
     effectiveClosed,
     getActiveMissState,
     getCartelaCheckState,
+    getCartelaProgressionActive,
     getPriorProgress,
     patternSettings,
     selectedCartelas,
@@ -568,9 +576,9 @@ export default function CheckCardModal({
     recordFinalWinner,
     notifyWinOpportunityPassed,
     refreshBackendGameState,
-    winProgressionActive,
     clearTransientCheckState,
     isCurrentCartelaCheck,
+    getCartelaProgressionActive,
   ]);
 
   useEffect(() => {
@@ -667,13 +675,14 @@ export default function CheckCardModal({
       let nextCheckResult = null;
 
       if (purchased && patternSettings && numbers) {
+        const progressionActive = getCartelaProgressionActive(trimmed);
         nextCheckResult = runCheckCardValidation({
           numbers,
           callerCalledNumbers,
           backendCalledNumbers,
           patternSettings,
           closed: effectiveClosed,
-          progressionActive: winProgressionActive,
+          progressionActive,
         });
       }
 
@@ -728,10 +737,10 @@ export default function CheckCardModal({
     applyFinalCheckOutcome,
     getActiveMissState,
     getCartelaCheckState,
+    getCartelaProgressionActive,
     getPriorProgress,
     notifyWinOpportunityPassed,
     isCurrentCartelaCheck,
-    winProgressionActive,
   ]);
 
   const handleLockToggle = useCallback(() => {

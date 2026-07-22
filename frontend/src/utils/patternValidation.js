@@ -169,8 +169,11 @@ function buildProgressStage(linesNow, requiredLines) {
 function buildProgressResult({
   completedLines,
   newlyCompleted,
+  completedNow = null,
   requiredLines,
 }) {
+  const allCompleted = completedNow ?? newlyCompleted;
+
   return {
     valid: false,
     progress: true,
@@ -178,7 +181,7 @@ function buildProgressResult({
     reason: 'progress',
     matchedPattern: newlyCompleted[0]?.patternId ?? 'closed-lines',
     matchedPatternLabel: newlyCompleted[0]?.definition?.label ?? 'Line Progress',
-    winningCells: flattenWinningCells(newlyCompleted),
+    winningCells: flattenWinningCells(allCompleted),
     completedLines,
     requiredLines,
     newlyCompletedLines: newlyCompleted.length,
@@ -263,6 +266,7 @@ export function validateCartelaWinWithClosed({
       return buildProgressResult({
         completedLines: linesNow,
         newlyCompleted: completedNow,
+        completedNow,
         requiredLines,
       });
     }
@@ -326,6 +330,7 @@ export function validateCartelaWinWithClosed({
     return buildProgressResult({
       completedLines: linesNow,
       newlyCompleted,
+      completedNow,
       requiredLines,
     });
   }
