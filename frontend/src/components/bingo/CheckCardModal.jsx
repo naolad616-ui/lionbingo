@@ -31,7 +31,7 @@ import {
   unlockCartela,
   writeCartelaCheckState,
 } from '../../utils/checkCardSession';
-import { getCachedCartela } from '../../utils/cartelaCache';
+import { getCachedCartela, peekCachedCartela } from '../../utils/cartelaCache';
 import { recordCheckCardWinner } from '../../utils/gameSalesTracking';
 import {
   cacheGamePatterns,
@@ -44,6 +44,13 @@ import {
   primeCheckCardSoundPlayback,
   resetCheckCardSoundState,
 } from '../../utils/gameSound';
+import {
+  createLatencyTrace,
+  getSocketLatencySnapshot,
+} from '../../utils/latencyTrace';
+
+/** Optional support fetches must never hold CHECKING for multiple seconds. */
+const SUPPORT_FETCH_TIMEOUT_MS = 500;
 
 function resolveLocalPatternSettings(currentPatterns) {
   if (currentPatterns && typeof currentPatterns === 'object') {
@@ -56,6 +63,32 @@ function resolveLocalPatternSettings(currentPatterns) {
   }
 
   return loadSidebarPatternSettings();
+}
+
+function withTimeout(promise, ms) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ timedOut: true, value: null });
+    }, ms);
+
+    Promise.resolve(promise).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve({ timedOut: false, value });
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve({ timedOut: false, value: null });
+      },
+    );
+  });
 }
 
 function runCheckCardValidation({
@@ -355,17 +388,27 @@ export default function CheckCardModal({
   }, [applyBackendGameState]);
 
   const evaluateCard = useCallback(async (trimmedCartelaNo, checkActionId, options = {}) => {
-    const { playSounds = true } = options;
+    const { playSounds = true, latencyTrace: incomingTrace = null } = options;
+    const socket = getSocket();
+    const latencyTrace = incomingTrace ?? createLatencyTrace('check-card-evaluate', {
+      cartelaNo: trimmedCartelaNo,
+      socketSnapshot: getSocketLatencySnapshot(socket),
+    });
+
     const parsedCartelaNo = parseCartelaNumber(trimmedCartelaNo);
     if (!parsedCartelaNo) {
       clearTransientCheckState();
+      setIsLoading(false);
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
+      latencyTrace.mark('ui_update_complete', { result: 'not-found' });
+      latencyTrace.finish({ aborted: true, reason: 'invalid-cartela' });
       return;
     }
 
     setIsLoading(true);
     setStatusMessage('');
     setDisplayWinningCells([]);
+    latencyTrace.mark('ui_loading_started');
 
     const profileStarted = performance.now();
     const mark = (name, startedAt = profileStarted) => ({
@@ -373,192 +416,306 @@ export default function CheckCardModal({
       ms: Number((performance.now() - startedAt).toFixed(2)),
     });
 
-    // Prefer live caller/session data already in memory.
-    const knownSelectedCartelas = Array.isArray(selectedCartelasProp)
-      ? selectedCartelasProp
-      : selectedCartelas;
-    const online = isBrowserOnline();
-    let activePatterns = patternSettings;
-    let backendCalls = backendCalledNumbers;
+    let supportMs = 0;
+    let supportTimedOut = false;
     let gameData = null;
 
-    // Offline: use locked/session/sidebar patterns — never wait on the network.
-    if ((!activePatterns || typeof activePatterns !== 'object') && !online) {
-      activePatterns = resolveLocalPatternSettings(null);
-      if (activePatterns) {
+    try {
+      // Prefer live caller/session data already in memory.
+      const knownSelectedCartelas = Array.isArray(selectedCartelasProp)
+        ? selectedCartelasProp
+        : selectedCartelas;
+      const online = isBrowserOnline();
+
+      // Always resolve patterns from React state → session cache → sidebar first.
+      // Never block CHECKING on network when local patterns already exist.
+      let activePatterns = resolveLocalPatternSettings(patternSettings);
+      if (activePatterns && activePatterns !== patternSettings) {
         setPatternSettings(activePatterns);
+        cacheGamePatterns(activePatterns);
       }
-    }
 
-    const needsPatterns = !activePatterns || typeof activePatterns !== 'object';
+      let backendCalls = backendCalledNumbers;
+      const hadLocalPatterns = Boolean(activePatterns && typeof activePatterns === 'object');
 
-    // Fetch cartela (cached) in parallel with patterns/game state only when missing online.
-    const cartelaFetchStarted = performance.now();
-    const cartelaPromise = getCachedCartela(trimmedCartelaNo, { allowNetwork: online }).then((result) => ({
-      result,
-      fetchMs: performance.now() - cartelaFetchStarted,
-      fromCache: Boolean(result.fromCache),
-    }));
-    const supportStarted = performance.now();
-    const supportPromise = needsPatterns && online
-      ? (async () => {
-        const [gameStateResult, patternsResult] = await Promise.all([
-          fetchGameState(),
-          fetchPatternSettings(),
-        ]);
-        const data = gameStateResult.ok ? gameStateResult.data : null;
-        if (data) {
-          applyBackendGameState(data);
-        }
+      latencyTrace.mark('evaluate_inputs_ready', {
+        online,
+        hadLocalPatterns,
+        cartelaCached: peekCachedCartela(trimmedCartelaNo).ok,
+        socketSnapshot: getSocketLatencySnapshot(socket),
+      });
 
-        const patterns = (data?.patterns && typeof data.patterns === 'object')
-          ? data.patterns
-          : (patternsResult.ok ? patternsResult.patterns : null);
+      // Cartela: use memory cache immediately; network only on miss.
+      const cartelaFetchStarted = performance.now();
+      latencyTrace.mark('cartela_fetch_start');
+      const peekedCartela = peekCachedCartela(trimmedCartelaNo);
+      let cartelaPacket;
 
-        if (patterns) {
-          cacheGamePatterns(patterns);
-        }
-
-        return {
-          data,
-          patterns,
-          backendCalls: Array.isArray(data?.calledNumbers) ? data.calledNumbers : null,
-          supportMs: performance.now() - supportStarted,
+      if (peekedCartela.ok) {
+        cartelaPacket = {
+          result: peekedCartela,
+          fetchMs: 0,
+          fromCache: true,
         };
-      })()
-      : Promise.resolve(null);
-
-    const [cartelaPacket, support] = await Promise.all([cartelaPromise, supportPromise]);
-
-    if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
-      return;
-    }
-
-    const cartelaResult = cartelaPacket.result;
-
-    if (support) {
-      gameData = support.data;
-      if (support.patterns) {
-        activePatterns = support.patterns;
-        setPatternSettings(support.patterns);
+        latencyTrace.mark('cartela_fetch_done', {
+          fromCache: true,
+          ok: true,
+          fetchMs: 0,
+        });
+      } else {
+        const result = await getCachedCartela(trimmedCartelaNo, { allowNetwork: online });
+        const fetchMs = performance.now() - cartelaFetchStarted;
+        cartelaPacket = {
+          result,
+          fetchMs,
+          fromCache: Boolean(result.fromCache),
+        };
+        latencyTrace.mark('cartela_fetch_done', {
+          fromCache: Boolean(result.fromCache),
+          ok: result.ok,
+          fetchMs: Number(fetchMs.toFixed(2)),
+        });
       }
-      if (Array.isArray(support.backendCalls)) {
-        backendCalls = support.backendCalls;
+
+      if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
+        latencyTrace.mark('stale_action_aborted');
+        latencyTrace.finish({ aborted: true, reason: 'stale-action' });
+        return;
       }
-    }
 
-    // Last resort after a failed online fetch (or offline gap): local cached patterns.
-    if (!activePatterns || typeof activePatterns !== 'object') {
-      activePatterns = resolveLocalPatternSettings(null);
-      if (activePatterns) {
-        setPatternSettings(activePatterns);
+      // Patterns still missing: optional support fetch with a hard timeout.
+      // If local data is enough, skip waiting entirely and refresh in background.
+      if (!hadLocalPatterns && online) {
+        const supportStarted = performance.now();
+        latencyTrace.mark('support_fetch_start', { timeoutMs: SUPPORT_FETCH_TIMEOUT_MS });
+
+        const supportFetch = (async () => {
+          const [gameStateResult, patternsResult] = await Promise.all([
+            fetchGameState('default', latencyTrace),
+            fetchPatternSettings(),
+          ]);
+          const data = gameStateResult.ok ? gameStateResult.data : null;
+          const patterns = (data?.patterns && typeof data.patterns === 'object')
+            ? data.patterns
+            : (patternsResult.ok ? patternsResult.patterns : null);
+
+          return {
+            data,
+            patterns,
+            backendCalls: Array.isArray(data?.calledNumbers) ? data.calledNumbers : null,
+          };
+        })();
+
+        const { timedOut, value: support } = await withTimeout(
+          supportFetch,
+          SUPPORT_FETCH_TIMEOUT_MS,
+        );
+        supportTimedOut = timedOut;
+        supportMs = performance.now() - supportStarted;
+
+        if (!timedOut && support) {
+          gameData = support.data;
+          if (support.data) {
+            applyBackendGameState(support.data);
+          }
+          if (support.patterns) {
+            activePatterns = support.patterns;
+            cacheGamePatterns(support.patterns);
+            setPatternSettings(support.patterns);
+          }
+          if (Array.isArray(support.backendCalls)) {
+            backendCalls = support.backendCalls;
+          }
+        } else if (timedOut) {
+          // Let the in-flight support request finish asynchronously without holding UI.
+          void supportFetch.then((support) => {
+            if (!support) return;
+            if (support.data) {
+              applyBackendGameState(support.data);
+            }
+            if (support.patterns) {
+              cacheGamePatterns(support.patterns);
+              setPatternSettings(support.patterns);
+            }
+          }).catch(() => {});
+        }
+
+        latencyTrace.mark('support_fetch_done', {
+          supportMs: Number(supportMs.toFixed(2)),
+          timedOut,
+          hasPatterns: Boolean(activePatterns),
+        });
       }
-    }
 
-    if (!cartelaResult.ok) {
-      setIsLoading(false);
-      clearTransientCheckState();
-      setStatusMessage(CHECK_CARD_MESSAGES.notFound);
-      return;
-    }
+      if (!activePatterns || typeof activePatterns !== 'object') {
+        activePatterns = resolveLocalPatternSettings(null);
+        if (activePatterns) {
+          setPatternSettings(activePatterns);
+          cacheGamePatterns(activePatterns);
+        }
+      }
 
-    const purchased = isCartelaPurchased(trimmedCartelaNo, knownSelectedCartelas);
-    let nextCheckResult = null;
+      if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
+        latencyTrace.mark('stale_action_aborted');
+        latencyTrace.finish({ aborted: true, reason: 'stale-action-after-support' });
+        return;
+      }
 
-    const validationStarted = performance.now();
-    const priorProgress = getPriorProgress(trimmedCartelaNo);
-    const priorState = getCartelaCheckState(trimmedCartelaNo);
-    const priorMissSnapshot = getActiveMissState(trimmedCartelaNo);
-    const progressionActive = getCartelaProgressionActive(trimmedCartelaNo);
+      const cartelaResult = cartelaPacket.result;
 
-    if (purchased && activePatterns) {
-      nextCheckResult = runCheckCardValidation({
-        numbers: cartelaResult.data.numbers,
-        callerCalledNumbers,
-        backendCalledNumbers: backendCalls,
-        patternSettings: activePatterns,
-        closed: effectiveClosed,
+      if (!cartelaResult.ok) {
+        clearTransientCheckState();
+        setStatusMessage(CHECK_CARD_MESSAGES.notFound);
+        latencyTrace.mark('ui_update_complete', { result: 'not-found' });
+        latencyTrace.finish({ aborted: true, reason: 'cartela-not-found' });
+        return;
+      }
+
+      const purchased = isCartelaPurchased(trimmedCartelaNo, knownSelectedCartelas);
+      let nextCheckResult = null;
+
+      const validationStarted = performance.now();
+      const priorProgress = getPriorProgress(trimmedCartelaNo);
+      const priorState = getCartelaCheckState(trimmedCartelaNo);
+      const priorMissSnapshot = getActiveMissState(trimmedCartelaNo);
+      const progressionActive = getCartelaProgressionActive(trimmedCartelaNo);
+
+      if (purchased && activePatterns) {
+        nextCheckResult = runCheckCardValidation({
+          numbers: cartelaResult.data.numbers,
+          callerCalledNumbers,
+          backendCalledNumbers: backendCalls,
+          patternSettings: activePatterns,
+          closed: effectiveClosed,
+          progressionActive,
+        });
+      }
+      const validationMs = performance.now() - validationStarted;
+      latencyTrace.mark('validation_done', {
+        validationMs: Number(validationMs.toFixed(2)),
         progressionActive,
       });
-    }
-    const validationMs = performance.now() - validationStarted;
 
-    // Show validated result immediately — do not wait on sounds or backend echo.
-    setIsLoading(false);
-    setNumbers(cartelaResult.data.numbers);
-    setCardLoaded(true);
-    setIsLocked(isCartelaLocked(trimmedCartelaNo));
+      // Show validated result immediately — do not wait on sounds or backend echo.
+      setNumbers(cartelaResult.data.numbers);
+      setCardLoaded(true);
+      setIsLocked(isCartelaLocked(trimmedCartelaNo));
 
-    console.log('[check-cartela-profile]', JSON.stringify({
-      step: 'evaluateCard',
-      cartelaNo: trimmedCartelaNo,
-      needsPatterns,
-      online,
-      cartelaFromCache: cartelaPacket.fromCache,
-      cartelaFetchMs: Number(cartelaPacket.fetchMs.toFixed(2)),
-      supportMs: support ? Number(support.supportMs.toFixed(2)) : 0,
-      validationMs: Number(validationMs.toFixed(2)),
-      totalUntilResultMs: mark('totalUntilResult').ms,
-    }));
-    const mergedCalls = mergeCalledNumbers(callerCalledNumbers, backendCalls);
-    const callCount = mergedCalls.length;
-    const finalOutcome = buildFinalCheckOutcome({
-      cartelaNo: trimmedCartelaNo,
-      checkResult: nextCheckResult,
-      isPurchased: purchased,
-      priorProgress,
-      priorMiss: priorMissSnapshot,
-      priorState,
-      callCount,
-      checkActionId,
-      playSounds,
-    });
+      console.log('[check-cartela-profile]', JSON.stringify({
+        step: 'evaluateCard',
+        cartelaNo: trimmedCartelaNo,
+        hadLocalPatterns,
+        supportTimedOut,
+        online,
+        cartelaFromCache: cartelaPacket.fromCache,
+        cartelaFetchMs: Number(cartelaPacket.fetchMs.toFixed(2)),
+        supportMs: Number(supportMs.toFixed(2)),
+        validationMs: Number(validationMs.toFixed(2)),
+        totalUntilResultMs: mark('totalUntilResult').ms,
+      }));
 
-    notifyWinOpportunityPassed(nextCheckResult);
+      const mergedCalls = mergeCalledNumbers(callerCalledNumbers, backendCalls);
+      const callCount = mergedCalls.length;
+      const finalOutcome = buildFinalCheckOutcome({
+        cartelaNo: trimmedCartelaNo,
+        checkResult: nextCheckResult,
+        isPurchased: purchased,
+        priorProgress,
+        priorMiss: priorMissSnapshot,
+        priorState,
+        callCount,
+        checkActionId,
+        playSounds,
+      });
 
-    if (playSounds) {
-      manualCheckOutcomeRef.current = finalOutcome;
-    }
+      notifyWinOpportunityPassed(nextCheckResult);
 
-    applyFinalCheckOutcome(finalOutcome, { suppressCelebration: !playSounds });
+      if (playSounds) {
+        manualCheckOutcomeRef.current = finalOutcome;
+      }
 
-    if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
-      return;
-    }
+      applyFinalCheckOutcome(finalOutcome, { suppressCelebration: !playSounds });
+      latencyTrace.mark('ui_update_complete', {
+        message: finalOutcome.message,
+        soundAction: finalOutcome.soundAction,
+      });
 
-    // Keep session state fresh in the background (non-blocking) while online.
-    if (online && !needsPatterns) {
-      void refreshBackendGameState();
-    }
+      if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
+        latencyTrace.finish({ aborted: true, reason: 'stale-after-ui' });
+        return;
+      }
 
-    if (playSounds && purchased && nextCheckResult) {
-      void playCheckCardOutcomeSound(finalOutcome).then(() => {
-        if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
-          return;
-        }
+      // Background refresh only when we validated from local patterns and did not
+      // already kick off a support fetch for this CHECK.
+      if (online && hadLocalPatterns) {
+        void refreshBackendGameState();
+      }
 
-        if (finalOutcome.celebrationWin) {
-          recordFinalWinner({
-            parsedCartelaNo,
-            nextCheckResult: finalOutcome.checkResult,
-            mergedCalls,
-            gameData,
-            soundKey: finalOutcome.soundKey,
+      if (playSounds && purchased && nextCheckResult) {
+        const soundStarted = performance.now();
+        latencyTrace.mark('sound_playback_start');
+        void playCheckCardOutcomeSound(finalOutcome).then(() => {
+          latencyTrace.mark('sound_playback_done', {
+            soundMs: Number((performance.now() - soundStarted).toFixed(2)),
           });
-        }
 
-        if (!isBrowserOnline()) {
-          return;
-        }
+          if (checkActionId !== checkActionIdRef.current || !isCurrentCartelaCheck(trimmedCartelaNo)) {
+            latencyTrace.finish({ aborted: true, reason: 'stale-after-sound' });
+            return;
+          }
 
-        void checkCartelaInGame(trimmedCartelaNo).then((backendCheck) => {
-          console.log('[check-card-sound] Backend check (informational, post-play):', {
-            ok: backendCheck.ok,
-            data: backendCheck.ok ? backendCheck.data : null,
-            error: backendCheck.ok ? null : backendCheck.error,
+          if (finalOutcome.celebrationWin) {
+            recordFinalWinner({
+              parsedCartelaNo,
+              nextCheckResult: finalOutcome.checkResult,
+              mergedCalls,
+              gameData,
+              soundKey: finalOutcome.soundKey,
+            });
+          }
+
+          if (!isBrowserOnline()) {
+            latencyTrace.finish({
+              offline: true,
+              socketSnapshot: getSocketLatencySnapshot(socket),
+            });
+            return;
+          }
+
+          latencyTrace.mark('backend_check_echo_start');
+          void checkCartelaInGame(trimmedCartelaNo, 'default', latencyTrace).then((backendCheck) => {
+            latencyTrace.mark('backend_check_echo_done', {
+              ok: backendCheck.ok,
+            });
+            console.log('[check-card-sound] Backend check (informational, post-play):', {
+              ok: backendCheck.ok,
+              data: backendCheck.ok ? backendCheck.data : null,
+              error: backendCheck.ok ? null : backendCheck.error,
+            });
+            latencyTrace.finish({
+              socketSnapshot: getSocketLatencySnapshot(getSocket()),
+              informationalBackendCheck: true,
+            });
           });
         });
+        return;
+      }
+
+      latencyTrace.finish({
+        playSounds,
+        socketSnapshot: getSocketLatencySnapshot(socket),
       });
+    } catch (error) {
+      latencyTrace.mark('evaluate_card_error', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      latencyTrace.finish({ aborted: true, reason: 'exception' });
+      if (isCurrentCartelaCheck(trimmedCartelaNo)) {
+        clearTransientCheckState();
+        setStatusMessage(CHECK_CARD_MESSAGES.notFound);
+      }
+    } finally {
+      setIsLoading(false);
     }
   }, [
     applyBackendGameState,
@@ -578,7 +735,6 @@ export default function CheckCardModal({
     refreshBackendGameState,
     clearTransientCheckState,
     isCurrentCartelaCheck,
-    getCartelaProgressionActive,
   ]);
 
   useEffect(() => {
@@ -586,6 +742,16 @@ export default function CheckCardModal({
       resetState();
       return undefined;
     }
+
+    // Seed patterns from session/sidebar immediately so the first CHECK never
+    // blocks on network when local data already exists.
+    setPatternSettings((current) => {
+      const resolved = resolveLocalPatternSettings(current);
+      if (resolved) {
+        cacheGamePatterns(resolved);
+      }
+      return resolved ?? current;
+    });
 
     if (isBrowserOnline()) {
       void refreshBackendGameState();
@@ -761,28 +927,47 @@ export default function CheckCardModal({
 
   const handleAction = useCallback(async () => {
     const trimmed = cartelaNo.trim();
+    const socketSnapshot = getSocketLatencySnapshot(getSocket());
+    const latencyTrace = createLatencyTrace('check-card', {
+      cartelaNo: trimmed,
+      socketSnapshot,
+    });
+    latencyTrace.mark('button_click', {
+      socketSnapshot,
+      isLocked,
+      cardLoaded,
+    });
+
     if (!trimmed) {
       invalidateInFlightChecks();
       clearTransientCheckState();
       setStatusMessage(CHECK_CARD_MESSAGES.notFound);
+      latencyTrace.mark('ui_update_complete', { result: 'not-found' });
+      latencyTrace.finish({ aborted: true, reason: 'empty-input' });
       return;
     }
 
     if (isLocked) {
       handleLockToggle();
+      latencyTrace.mark('ui_update_complete', { action: 'unlock' });
+      latencyTrace.finish({ mode: 'unlock' });
       return;
     }
 
     if (cardLoaded) {
       handleLockToggle();
+      latencyTrace.mark('ui_update_complete', { action: 'lock' });
+      latencyTrace.finish({ mode: 'lock' });
       return;
     }
 
     primeCheckCardSoundPlayback();
+    latencyTrace.mark('sound_prime_done');
 
     const checkActionId = checkActionIdRef.current + 1;
     checkActionIdRef.current = checkActionId;
-    await evaluateCard(trimmed, checkActionId);
+    latencyTrace.mark('evaluate_card_start');
+    await evaluateCard(trimmed, checkActionId, { latencyTrace });
   }, [cardLoaded, cartelaNo, clearTransientCheckState, evaluateCard, handleLockToggle, invalidateInFlightChecks, isLocked]);
 
   const handleSubmit = useCallback((event) => {

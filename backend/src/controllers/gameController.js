@@ -3,6 +3,7 @@ import { roomManager } from '../services/gameEngine.js';
 import { validateCartelaForRoom } from '../services/validationService.js';
 import { finalizeValidatedWinner } from '../services/winnerResultService.js';
 import { createRequestTimer, measureSync } from '../utils/requestTimer.js';
+import { logLatency, markHandler } from '../utils/latencyTrace.js';
 
 function getRoomId(value) {
   return value || DEFAULT_ROOM_ID;
@@ -26,12 +27,29 @@ function getSalesConfig(body = {}) {
   };
 }
 
-function emitGameState(io, roomId) {
+function emitGameState(io, roomId, req = null) {
+  const emitStarted = process.hrtime.bigint();
+  markHandler(req, 'socket_emit_start', { event: 'game:state', roomId });
   const room = roomManager.getRoom(roomId);
-  io.to(roomId).emit('game:state', room.getPublicState());
+  const state = room.getPublicState();
+  io.to(roomId).emit('game:state', state);
+  const emitMs = Number(process.hrtime.bigint() - emitStarted) / 1e6;
+  markHandler(req, 'socket_emit_finish', {
+    event: 'game:state',
+    roomId,
+    emitMs: Number(emitMs.toFixed(2)),
+  });
+  logLatency({
+    stage: 'socket_emit:game:state',
+    roomId,
+    emitMs: Number(emitMs.toFixed(2)),
+    traceId: req?.latencyTrace?.id ?? null,
+    action: req?.latencyTrace?.action ?? null,
+  });
 }
 
 export function getGameState(req, res) {
+  markHandler(req, 'backend_handler_start', { handler: 'getGameState' });
   const timer = createRequestTimer('GET /api/game/state');
   const roomId = getRoomId(req.query.roomId);
   const roomMeasured = measureSync(() => roomManager.getRoom(roomId));
@@ -51,6 +69,10 @@ export function getGameState(req, res) {
     ].join(', '),
   );
   res.setHeader('Access-Control-Expose-Headers', 'Server-Timing');
+  markHandler(req, 'backend_handler_finish', {
+    handler: 'getGameState',
+    totalMs: profile.totalMs,
+  });
   res.json(stateMeasured.value);
 }
 
@@ -77,7 +99,7 @@ export function configureGameSales(req, res) {
   );
 
   const io = req.app.get('io');
-  if (io) emitGameState(io, roomId);
+  if (io) emitGameState(io, roomId, req);
 
   res.json({
     sales: room.sales,
@@ -87,6 +109,7 @@ export function configureGameSales(req, res) {
 }
 
 export function lockGamePrize(req, res) {
+  markHandler(req, 'backend_handler_start', { handler: 'lockGamePrize' });
   const roomId = getRoomId(req.body?.roomId);
   const room = roomManager.getRoom(roomId);
   const salesConfig = getSalesConfig(req.body);
@@ -97,14 +120,19 @@ export function lockGamePrize(req, res) {
     && room.status !== 'running'
     && room.status !== 'paused'
   ) {
+    markHandler(req, 'configure_sales_start');
     room.configureSales(salesConfig);
+    markHandler(req, 'configure_sales_done');
   }
 
+  markHandler(req, 'lock_prize_start');
   const prize = room.lockPrize();
+  markHandler(req, 'lock_prize_done');
 
   const io = req.app.get('io');
-  if (io) emitGameState(io, roomId);
+  if (io) emitGameState(io, roomId, req);
 
+  markHandler(req, 'backend_handler_finish', { handler: 'lockGamePrize' });
   res.json({
     sales: room.sales,
     prize,
@@ -201,12 +229,14 @@ export function resetGame(req, res) {
 }
 
 export function checkCartela(req, res) {
+  markHandler(req, 'backend_handler_start', { handler: 'checkCartela' });
   const timer = createRequestTimer('POST /api/game/check');
   const roomId = getRoomId(req.body?.roomId);
   const cartelaNumber = req.body?.cartelaNumber ?? req.body?.cartelaNo;
 
   if (cartelaNumber === undefined || cartelaNumber === null || cartelaNumber === '') {
     timer.log({ ok: false, error: 'cartelaNumber required' });
+    markHandler(req, 'backend_handler_finish', { handler: 'checkCartela', ok: false });
     res.status(400).json({ error: 'cartelaNumber is required' });
     return;
   }
@@ -216,6 +246,9 @@ export function checkCartela(req, res) {
     roomId,
     action: 'check',
   }));
+  markHandler(req, 'validation_done', {
+    validationMs: Number(validationMeasured.ms.toFixed(2)),
+  });
   const profile = timer.log({
     cartelaNumber,
     mongoQueryMs: 0,
@@ -230,6 +263,10 @@ export function checkCartela(req, res) {
     ].join(', '),
   );
   res.setHeader('Access-Control-Expose-Headers', 'Server-Timing');
+  markHandler(req, 'backend_handler_finish', {
+    handler: 'checkCartela',
+    totalMs: profile.totalMs,
+  });
   res.json(validationMeasured.value);
 }
 

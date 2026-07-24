@@ -40,25 +40,45 @@ export function resolveAssetUrl(assetPath) {
 export async function apiFetch(path, options = {}) {
   const isFormData = options.body instanceof FormData;
   const token = getAuthToken();
+  const { latencyTrace, headers: optionHeaders, ...restOptions } = options;
+  const method = (restOptions.method || 'GET').toUpperCase();
 
+  if (latencyTrace) {
+    latencyTrace.mark('frontend_request_start', { path, method });
+  }
+
+  const requestStarted = performance.now();
   const response = await fetch(`${API_BASE}${path}`, {
+    ...restOptions,
     headers: {
       ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
+      ...(latencyTrace ? latencyTrace.getHeaders() : {}),
+      ...optionHeaders,
     },
-    ...options,
   });
+
+  if (latencyTrace) {
+    latencyTrace.mark('frontend_response_received', {
+      path,
+      method,
+      status: response.status,
+      networkMs: Number((performance.now() - requestStarted).toFixed(2)),
+      serverTiming: response.headers.get('server-timing'),
+    });
+  }
 
   return response;
 }
 
-export async function fetchCartela(cartelaNo) {
+export async function fetchCartela(cartelaNo, latencyTrace = null) {
   const trimmed = String(cartelaNo ?? '').trim();
   const started = performance.now();
 
   try {
-    const response = await apiFetch(`/api/cartela/${encodeURIComponent(trimmed)}`);
+    const response = await apiFetch(`/api/cartela/${encodeURIComponent(trimmed)}`, {
+      latencyTrace,
+    });
     const headersMs = performance.now() - started;
     const serverTiming = response.headers.get('server-timing');
 
@@ -108,9 +128,11 @@ export async function fetchCartela(cartelaNo) {
   }
 }
 
-export async function fetchGameState(roomId = 'default') {
+export async function fetchGameState(roomId = 'default', latencyTrace = null) {
   try {
-    const response = await apiFetch(`/api/game/state?roomId=${encodeURIComponent(roomId)}`);
+    const response = await apiFetch(`/api/game/state?roomId=${encodeURIComponent(roomId)}`, {
+      latencyTrace,
+    });
 
     if (!response.ok) {
       return { ok: false, calledNumbers: [], data: null };
@@ -164,11 +186,13 @@ export async function lockGamePrize({
   selectedCartelas,
   closed,
   roomId = 'default',
+  latencyTrace = null,
 }) {
   try {
     const response = await apiFetch('/api/game/lock-prize', {
       method: 'POST',
       body: JSON.stringify({ betAmount, cardsSold, selectedCartelas, closed, roomId }),
+      latencyTrace,
     });
 
     if (!response.ok) {
@@ -176,7 +200,12 @@ export async function lockGamePrize({
       return { ok: false, error: body.error || 'Failed to lock game prize' };
     }
 
+    const parseStarted = performance.now();
     const data = await response.json();
+    latencyTrace?.mark('frontend_response_body_parsed', {
+      path: '/api/game/lock-prize',
+      parseMs: Number((performance.now() - parseStarted).toFixed(2)),
+    });
     console.log('[sales-trace] lockGamePrize response', {
       source: 'backend',
       sales: data.sales ?? null,
@@ -225,9 +254,9 @@ export async function shuffleGameState(roomId = 'default') {
   return { ok: true, data };
 }
 
-export async function fetchSoundSettings() {
+export async function fetchSoundSettings(latencyTrace = null) {
   try {
-    const response = await apiFetch('/api/settings/sound');
+    const response = await apiFetch('/api/settings/sound', { latencyTrace });
 
     if (!response.ok) {
       return { ok: false, speed: null, voice: null, intervalMs: null };
@@ -354,11 +383,12 @@ export async function saveCommissionTiers(tiers) {
   return { ok: true, tiers: Array.isArray(body.tiers) ? body.tiers : [] };
 }
 
-export async function checkCartelaInGame(cartelaNumber, roomId = 'default') {
+export async function checkCartelaInGame(cartelaNumber, roomId = 'default', latencyTrace = null) {
   try {
     const response = await apiFetch('/api/game/check', {
       method: 'POST',
       body: JSON.stringify({ cartelaNumber, roomId }),
+      latencyTrace,
     });
 
     if (!response.ok) {
@@ -367,6 +397,9 @@ export async function checkCartelaInGame(cartelaNumber, roomId = 'default') {
     }
 
     const data = await response.json();
+    latencyTrace?.mark('frontend_check_api_body_parsed', {
+      path: '/api/game/check',
+    });
     return { ok: true, data };
   } catch (error) {
     return { ok: false, error: error.message || 'Failed to check cartela' };

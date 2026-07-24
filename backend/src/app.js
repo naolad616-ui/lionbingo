@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import routes from './routes/index.js';
+import { latencyTraceMiddleware } from './utils/latencyTrace.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsRoot = path.resolve(__dirname, '../data/uploads');
@@ -24,6 +25,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
+app.use(latencyTraceMiddleware);
 app.use('/uploads', express.static(uploadsRoot));
 app.use(
   '/sounds',

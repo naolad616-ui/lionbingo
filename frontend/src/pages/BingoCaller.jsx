@@ -18,7 +18,7 @@ import {
   clearGameSessionCache,
   warmGameSessionCache,
 } from '../utils/gameSessionCache';
-import getSocket from '../services/socket';
+import getSocket, { logSocketEmit } from '../services/socket';
 import {
   fetchPatternSettings,
   fetchSoundSettings,
@@ -26,6 +26,10 @@ import {
   resetGameState,
   shuffleGameState,
 } from '../services/api';
+import {
+  createLatencyTrace,
+  getSocketLatencySnapshot,
+} from '../utils/latencyTrace';
 import { DEFAULT_CALL_INTERVAL_MS } from '../utils/speedSettings';
 import { readStoredClosedValue, resolveClosedValue } from '../utils/closedRules';
 import { clearAllMissedClaims } from '../utils/checkCardSession';
@@ -137,8 +141,10 @@ export default function BingoCaller() {
     setCalledNumbers((current) => [...current, nextNumber]);
   }, [clearIntervalTimer, drawOrder]);
 
-  const refreshCallInterval = useCallback(async () => {
-    const result = await fetchSoundSettings();
+  const refreshCallInterval = useCallback(async (latencyTrace = null) => {
+    latencyTrace?.mark('fetch_sound_settings_start');
+    const result = await fetchSoundSettings(latencyTrace);
+    latencyTrace?.mark('fetch_sound_settings_done', { ok: result.ok, intervalMs: result.intervalMs });
     if (result.ok && result.intervalMs) {
       callIntervalMsRef.current = result.intervalMs;
     }
@@ -161,30 +167,50 @@ export default function BingoCaller() {
     [clearIntervalTimer, drawNext],
   );
 
-  const startCalling = useCallback(async () => {
+  const startCalling = useCallback(async (latencyTrace = null) => {
     if (drawIndexRef.current >= drawOrder.length) return;
 
     // Cache every selected cartela before balls are drawn so offline CHECK
     // works for all of them without a prior online check.
+    latencyTrace?.mark('warm_session_cache_start');
     warmGameSessionCache({ selectedCartelas });
-    await preloadCartelas(selectedCartelas);
+    latencyTrace?.mark('warm_session_cache_done');
 
-    const lockResult = await lockGamePrize({ betAmount, cardsSold, selectedCartelas, closed });
+    await preloadCartelas(selectedCartelas, latencyTrace);
+
+    latencyTrace?.mark('lock_prize_call_start');
+    const lockResult = await lockGamePrize({
+      betAmount,
+      cardsSold,
+      selectedCartelas,
+      closed,
+      latencyTrace,
+    });
+    latencyTrace?.mark('lock_prize_call_done', { ok: lockResult.ok });
     if (lockResult.ok && lockResult.state?.patterns) {
       cacheGamePatterns(lockResult.state.patterns);
     }
 
-    await refreshCallInterval();
+    latencyTrace?.mark('refresh_call_interval_start');
+    await refreshCallInterval(latencyTrace);
+    latencyTrace?.mark('refresh_call_interval_done');
 
     clearIntervalTimer();
     setIsRunning(true);
     setIsPaused(false);
+    latencyTrace?.mark('ui_update_running_state');
 
     if (calledNumbers.length === 0) {
       drawNext();
+      latencyTrace?.mark('first_ball_drawn');
     }
 
     intervalRef.current = window.setInterval(drawNext, callIntervalMsRef.current);
+    latencyTrace?.mark('ui_update_complete');
+    latencyTrace?.finish({
+      selectedCartelaCount: Array.isArray(selectedCartelas) ? selectedCartelas.length : 0,
+      socketSnapshot: getSocketLatencySnapshot(getSocket()),
+    });
   }, [
     betAmount,
     calledNumbers.length,
@@ -207,7 +233,16 @@ export default function BingoCaller() {
   }, [clearIntervalTimer, isRunning, isPaused]);
 
   const handleStart = () => {
-    if (isRunning && !isPaused) return;
+    const socket = getSocket();
+    const socketSnapshot = getSocketLatencySnapshot(socket);
+    const latencyTrace = createLatencyTrace('start-game', { socketSnapshot });
+    latencyTrace.mark('button_click', { socketSnapshot, isPaused, isRunning });
+
+    if (isRunning && !isPaused) {
+      latencyTrace.mark('early_return_already_running');
+      latencyTrace.finish({ aborted: true, reason: 'already-running' });
+      return;
+    }
 
     // Resume after Pause or Check Cartela: call the next number immediately,
     // then continue on the normal interval (no initial wait).
@@ -215,20 +250,34 @@ export default function BingoCaller() {
       clearIntervalTimer();
       setIsPaused(false);
       drawNext();
+      latencyTrace.mark('resume_first_draw');
 
       const intervalMs = callIntervalMsRef.current;
       intervalRef.current = window.setInterval(drawNext, intervalMs);
+      latencyTrace.mark('ui_update_complete', { mode: 'resume' });
 
       void refreshCallInterval().then((nextIntervalMs) => {
-        if (!isRunningRef.current || isPausedRef.current) return;
-        if (nextIntervalMs === intervalMs) return;
+        latencyTrace.mark('resume_interval_refresh_done', {
+          previousIntervalMs: intervalMs,
+          nextIntervalMs,
+        });
+        if (!isRunningRef.current || isPausedRef.current) {
+          latencyTrace.finish({ mode: 'resume', abortedAfterRefresh: true });
+          return;
+        }
+        if (nextIntervalMs === intervalMs) {
+          latencyTrace.finish({ mode: 'resume', intervalUnchanged: true });
+          return;
+        }
         clearIntervalTimer();
         intervalRef.current = window.setInterval(drawNext, nextIntervalMs);
+        latencyTrace.mark('resume_interval_replaced');
+        latencyTrace.finish({ mode: 'resume' });
       });
       return;
     }
 
-    void startCalling();
+    void startCalling(latencyTrace);
   };
 
   const handlePause = () => {
@@ -238,13 +287,29 @@ export default function BingoCaller() {
   };
 
   const handleCheck = () => {
+    const socket = getSocket();
+    const socketSnapshot = getSocketLatencySnapshot(socket);
+    const latencyTrace = createLatencyTrace('check-card-open', { socketSnapshot });
+    latencyTrace.mark('button_click', {
+      socketSnapshot,
+      calledCount: calledNumbers.length,
+    });
+
     if (calledNumbers.length < MIN_BALLS_FOR_CHECK) {
+      latencyTrace.mark('early_return_min_balls');
+      latencyTrace.finish({ aborted: true, reason: 'min-balls' });
       return;
     }
 
     pauseCalling();
+    latencyTrace.mark('pause_calling_done');
     playPauseSound();
+    latencyTrace.mark('pause_sound_started');
     setCheckModalOpen(true);
+    latencyTrace.mark('ui_update_complete', { modalOpen: true });
+    latencyTrace.finish({
+      socketSnapshot: getSocketLatencySnapshot(socket),
+    });
   };
 
   const clearShuffleHideTimer = useCallback(() => {
@@ -376,6 +441,7 @@ export default function BingoCaller() {
       socket.connect();
     }
 
+    logSocketEmit('join-room', { roomId: 'default' });
     socket.emit('join-room', { roomId: 'default' });
     socket.on('settings:updated', handleSettingsUpdated);
     socket.on('game:state', handleGameState);

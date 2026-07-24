@@ -1,5 +1,6 @@
 import { describeCartelaLookup } from '../services/cartelaService.js';
 import { createRequestTimer, measureSync } from '../utils/requestTimer.js';
+import { markHandler } from '../utils/latencyTrace.js';
 
 const MIN_CARTELA_NO = 1;
 const MAX_CARTELA_NO = 150;
@@ -55,6 +56,7 @@ function buildCartelaResponse(cartelaNo, cartela) {
 }
 
 function respondWithCartela(req, res, rawCartelaNo) {
+  markHandler(req, 'backend_handler_start', { handler: 'respondWithCartela' });
   const timer = createRequestTimer('GET /api/cartela');
   timer.mark('arrival');
 
@@ -140,7 +142,11 @@ function respondWithCartela(req, res, rawCartelaNo) {
     ].join(', '),
   );
   res.setHeader('Access-Control-Expose-Headers', 'Server-Timing');
-
+  markHandler(req, 'backend_handler_finish', {
+    handler: 'respondWithCartela',
+    totalMs: profile.totalMs,
+    cartelaNo: parsed.cartelaNo,
+  });
   res.json(payload);
 }
 

@@ -82,13 +82,19 @@ export async function getCachedCartela(cartelaNo, { allowNetwork = true } = {}) 
  * works offline for every selected card — not only ones already checked online.
  * Safe to call repeatedly; only fetches IDs that are not yet cached.
  */
-export function preloadCartelas(cardIds = []) {
+export function preloadCartelas(cardIds = [], latencyTrace = null) {
   const ids = normalizeCartelaIds(cardIds);
   if (ids.length === 0) {
+    latencyTrace?.mark('preload_cartelas_skip', { reason: 'empty' });
     return Promise.resolve(true);
   }
 
   return (async () => {
+    const preloadStarted = performance.now();
+    latencyTrace?.mark('preload_cartelas_start', {
+      requested: ids.length,
+    });
+
     const missing = ids.filter((id) => !cartelaResponseCache.has(String(id)));
     if (missing.length === 0) {
       console.log('[check-cartela-profile]', JSON.stringify({
@@ -98,6 +104,13 @@ export function preloadCartelas(cardIds = []) {
         alreadyCached: ids.length,
         cacheSize: cartelaResponseCache.size,
       }));
+      latencyTrace?.mark('preload_cartelas_done', {
+        requested: ids.length,
+        missing: 0,
+        loaded: 0,
+        alreadyCached: ids.length,
+        durationMs: Number((performance.now() - preloadStarted).toFixed(2)),
+      });
       return true;
     }
 
@@ -109,6 +122,12 @@ export function preloadCartelas(cardIds = []) {
         skippedOffline: true,
         cacheSize: cartelaResponseCache.size,
       }));
+      latencyTrace?.mark('preload_cartelas_done', {
+        requested: ids.length,
+        missing: missing.length,
+        skippedOffline: true,
+        durationMs: Number((performance.now() - preloadStarted).toFixed(2)),
+      });
       return false;
     }
 
@@ -117,12 +136,19 @@ export function preloadCartelas(cardIds = []) {
 
     for (let index = 0; index < missing.length; index += batchSize) {
       const batch = missing.slice(index, index + batchSize);
+      const batchStarted = performance.now();
       await Promise.all(batch.map(async (id) => {
         const result = await fetchAndCacheCartela(String(id));
         if (result.ok) {
           loaded += 1;
         }
       }));
+      latencyTrace?.mark('preload_cartelas_batch', {
+        batchStart: index,
+        batchSize: batch.length,
+        batchMs: Number((performance.now() - batchStarted).toFixed(2)),
+        loadedSoFar: loaded,
+      });
     }
 
     console.log('[check-cartela-profile]', JSON.stringify({
@@ -132,9 +158,18 @@ export function preloadCartelas(cardIds = []) {
       loaded,
       cacheSize: cartelaResponseCache.size,
     }));
+    latencyTrace?.mark('preload_cartelas_done', {
+      requested: ids.length,
+      missing: missing.length,
+      loaded,
+      durationMs: Number((performance.now() - preloadStarted).toFixed(2)),
+    });
     return loaded === missing.length;
   })().catch((error) => {
     console.warn('[check-cartela-profile] preloadCartelas failed', error);
+    latencyTrace?.mark('preload_cartelas_error', {
+      message: error?.message ?? String(error),
+    });
     return false;
   });
 }

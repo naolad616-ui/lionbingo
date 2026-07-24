@@ -9,6 +9,7 @@ import { saveCommissionTiers } from '../services/commissionService.js';
 import { roomManager } from '../services/gameEngine.js';
 import { validateCartelaForRoom } from '../services/validationService.js';
 import { finalizeValidatedWinner } from '../services/winnerResultService.js';
+import { logLatency } from '../utils/latencyTrace.js';
 import {
   getOnlineCount,
   trackSocketDisconnect,
@@ -20,8 +21,15 @@ function getRoomId(payload = {}) {
 }
 
 function broadcastGameState(io, roomId) {
+  const emitStarted = process.hrtime.bigint();
   const room = roomManager.getRoom(roomId);
   io.to(roomId).emit('game:state', room.getPublicState());
+  logLatency({
+    stage: 'socket_emit:game:state',
+    roomId,
+    emitMs: Number((Number(process.hrtime.bigint() - emitStarted) / 1e6).toFixed(2)),
+    source: 'broadcastGameState',
+  });
 }
 
 function broadcastPresence(io, roomId) {
@@ -75,10 +83,21 @@ function attachBallHandler(io, room, roomId) {
 export function initializeSocket(io) {
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
+    logLatency({
+      stage: 'socket_connection',
+      socketId: socket.id,
+    });
     socket.data.joinedRooms = [];
 
     socket.on('join-room', (payload = {}) => {
+      const joinStarted = process.hrtime.bigint();
       const roomId = getRoomId(payload);
+      logLatency({
+        stage: 'socket_handler_start',
+        event: 'join-room',
+        socketId: socket.id,
+        roomId,
+      });
       socket.join(roomId);
       trackSocketJoin(roomId, socket.id);
       if (!socket.data.joinedRooms.includes(roomId)) {
@@ -96,6 +115,13 @@ export function initializeSocket(io) {
         intervalMs: room.intervalMs,
       });
       broadcastPresence(io, roomId);
+      logLatency({
+        stage: 'socket_handler_finish',
+        event: 'join-room',
+        socketId: socket.id,
+        roomId,
+        handlerMs: Number((Number(process.hrtime.bigint() - joinStarted) / 1e6).toFixed(2)),
+      });
     });
 
     socket.on('game:start', (payload = {}) => {
